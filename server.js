@@ -152,10 +152,19 @@ app.get('/export.csv', (req,res)=>{
   res.send('\ufeff' + lines.join('\r\n'));
 });
 
+// ===================== TIMEZONE (exibicao em America/Fortaleza) =====================
+const TZ = 'America/Fortaleza';
+const dayFmt = new Intl.DateTimeFormat('en-CA', {timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit'}); // YYYY-MM-DD
+const hourFmt = new Intl.DateTimeFormat('en-GB', {timeZone: TZ, hour:'numeric', hour12:false});
+function localDay(ts){ try { return dayFmt.format(new Date(ts)); } catch(e){ return String(ts).slice(0,10); } }
+function localHour(ts){ try { return Number(hourFmt.format(new Date(ts))); } catch(e){ return new Date(ts).getHours(); } }
+function fmtDT(ts){ try { return new Date(ts).toLocaleString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
+function fmtTime(ts){ try { return new Date(ts).toLocaleTimeString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
+
 // ===================== BACKUP DIARIO =====================
 function doBackup(){
   try {
-    const d = new Date().toISOString().slice(0,10);
+    const d = localDay(Date.now());
     const dest = path.join(BACKUP_DIR, 'events-' + d + '.db');
     fs.copyFileSync(DB_FILE, dest);
     const files = fs.readdirSync(BACKUP_DIR).filter(f=>f.startsWith('events-')&&f.endsWith('.db')).sort();
@@ -178,13 +187,14 @@ function salesChart(){
   const rows = db.prepare("SELECT ts FROM events WHERE evento='venda.paga'").all();
   const byDay = {}, byHour = {};
   const now = new Date();
-  for (let i=13;i>=0;i--){ const d=new Date(now); d.setDate(d.getDate()-i); byDay[d.toISOString().slice(0,10)]=0; }
+  for (let i=13;i>=0;i--){ const d=new Date(now.getTime() - i*86400000); byDay[localDay(d)]=0; }
   for (let h=0;h<24;h++) byHour[h]=0;
+  const todayKey = localDay(now);
   for (const r of rows){
     const t = new Date(r.ts);
-    const day = r.ts.slice(0,10);
+    const day = localDay(r.ts);
     if (day in byDay) byDay[day]++;
-    if (t.toDateString()===now.toDateString()) byHour[t.getHours()]++;
+    if (day===todayKey) byHour[localHour(r.ts)]++;
   }
   const W=1010,PAD=8,BW=(W-2*PAD)/14-8;
   const H=170,maxD=Math.max(1,...Object.values(byDay));
@@ -208,7 +218,7 @@ function salesChart(){
   return chartCard('Vendas por dia (14 dias)', svgDay) + chartCard('Vendas por hora (hoje)', svgHour);
 }
 
-function startOfToday(){ const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
+function startOfToday(){ return Date.parse(localDay(Date.now()) + 'T00:00:00-03:00'); } // meia-noite America/Fortaleza (UTC-3, sem DST)
 function fmtBRL(centavos, moeda){
   const cur = moeda || 'BRL';
   try { return (centavos/100).toLocaleString('pt-BR',{style:'currency',currency:cur}); } catch(e){ return 'R$ ' + (centavos/100).toFixed(2); }
@@ -291,7 +301,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <div id=feed>__FEED__</div>
 </div>
 <script>
-setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR')},1000);document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR');
+setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})},1000);document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})}
 const qi=document.getElementById('q');qi.value=sessionStorage.getItem('legacy_q')||'';
 function fltr(){const q=qi.value.toLowerCase();sessionStorage.setItem('legacy_q',q);document.querySelectorAll('.ev').forEach(el=>{el.style.display=el.dataset.s.includes(q)?'':'none'})}
 fltr();
@@ -320,10 +330,10 @@ app.get('/', (req,res)=>{
   const card = (e)=>{
     const b = e.body || {};
     if (!b.webhook_evento){
-      return '<div class=ev data-s="'+esc(JSON.stringify(b).toLowerCase())+'"><div class=meta>#'+esc(e.id)+' · <b>'+esc(e.origem)+'</b> · '+new Date(e.ts).toLocaleString('pt-BR')+'</div><details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
+      return '<div class=ev data-s="'+esc(JSON.stringify(b).toLowerCase())+'"><div class=meta>#'+esc(e.id)+' · <b>'+esc(e.origem)+'</b> · '+fmtDT(e.ts)+'</div><details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
     }
     const cli = b.cliente || {}, prod = b.produto || {}, venda = b.venda || {}, c = b.carrinho || {};
-    const hora = new Date(e.ts).toLocaleTimeString('pt-BR');
+    const hora = fmtTime(e.ts);
     const badge = b.webhook_evento==='venda.paga' ? '<span class="badge b-gold">✅ venda.paga</span>'
       : b.webhook_evento==='carrinho.abandonado' ? '<span class="badge b-orange">🛒 carrinho.abandonado</span>'
       : '<span class="badge b-gray">'+esc(b.webhook_evento)+'</span>';
