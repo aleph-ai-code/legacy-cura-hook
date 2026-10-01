@@ -1,10 +1,9 @@
-FROM node:20-alpine AS build
-RUN apk add python3 make g++ --no-cache
+FROM node:20-bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
-FROM node:20-alpine
-RUN apk add --no-cache tzdata
+FROM node:20-bookworm-slim
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY server.js package.json ./
