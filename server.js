@@ -178,6 +178,7 @@ app.use((req,res,next)=>{
   if (req.path==='/favicon.ico') return res.status(404).end();
   const user = getAuth(req);
   if (user){ req.user = user; return next(); }
+  if (req.path.startsWith('/api/')) return res.status(401).json({ok:false, erro:'nao_autenticado'});
   const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar', 'pendente':'pendente', 'existe':'existe', 'ok':'ok', 'bloqueado':'bloqueado' };
   res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
   return res.send(loginPage(errMap[req.query && req.query.erro] || '', req.query && req.query.modo === 'criar' ? 'criar' : undefined));
@@ -635,6 +636,13 @@ function rankingDrawerHtml(){
     + '<div id=rk-hoje>' + rankPeriodHtml(hoje) + '</div>'
     + '<div id=rk-d7 hidden>' + rankPeriodHtml(d7) + '</div></div>';
 }
+// Endpoint JSON do ranking (protegido por login)
+app.get('/api/ranking', (req,res)=>{
+  if (!requireUser(req,res)) return;
+  const p = String(req.query.periodo||'hoje') === 'd7' ? 'd7' : 'hoje';
+  const r = rankPer(p === 'd7' ? Date.now() - 7*86400000 : startOfToday());
+  res.json({ok:true, periodo:p, onboarding:r.onb, recuperacao:r.rec, atividade:r.tot});
+});
 
 function usersCardHtml(req){
   const usersAll = db.prepare('SELECT nome, status, role, criado_em FROM users ORDER BY id ASC').all();
@@ -732,7 +740,7 @@ table.recov td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}
 .opbtns button.no{border-color:rgba(224,138,138,.4);color:#e08a8a}
 .opbtns input{background:#17251d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:6px 10px;font-size:12px;outline:none}
 .nota{margin-top:6px;font-size:12px;color:var(--mut)}
-.chartbar{display:flex;padding:12px 0 0}
+.chartbar{display:flex;padding:12px 0 0;gap:8px}
 .btn-charts{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;cursor:pointer;background:transparent;line-height:1.4}
 .btn-charts:hover{background:rgba(212,165,63,.1)}
 .btn-charts.on{background:var(--gold);color:#1a1033;font-weight:600;border-color:var(--gold)}
