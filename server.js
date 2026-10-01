@@ -591,6 +591,51 @@ function recoveryTable(){
   return chartCard('Recuperação por pessoa', html);
 }
 
+// ===================== RANKING DO TIME (drawer) =====================
+function rankPer(since){
+  const all = db.prepare('SELECT user_nome, acao FROM acoes WHERE ts >= ?').all(new Date(since).toISOString());
+  const onb = {}, claims = {}, wins = {}, tot = {};
+  for (const r of all){
+    const u = r.user_nome || '?';
+    tot[u] = (tot[u]||0)+1;
+    if (CHECKS.includes(r.acao)) onb[u] = (onb[u]||0)+1;
+    if (r.acao === 'claim_carrinho') claims[u] = (claims[u]||0)+1;
+    if (r.acao === 'resultado_conquistou') wins[u] = (wins[u]||0)+1;
+  }
+  const onbRows = Object.keys(onb).map(u=>({nome:u, val:onb[u], sub:onb[u]+' check'+(onb[u]===1?'':'s')})).sort((a,b)=>b.val-a.val);
+  const recRows = Object.keys(claims).map(u=>{
+    const a = claims[u]||0, c = wins[u]||0, pct = a ? Math.round(c*100/a) : 0;
+    return {nome:u, val:a+c, sub:a+' assumid'+(a===1?'o':'os')+' · '+c+' conquistad'+(c===1?'o':'os')+' · '+pct+'%'};
+  }).sort((a,b)=>b.val-a.val);
+  const totRows = Object.keys(tot).map(u=>({nome:u, val:tot[u], sub:tot[u]+' açõe'+(tot[u]===1?'s':'s').replace('1 ações','1 ação')})).sort((a,b)=>b.val-a.val);
+  return { onb: onbRows, rec: recRows, tot: totRows };
+}
+function svgRank(list){
+  if (!list.length) return '<div style="color:#a8b0a0;text-align:center;padding:16px 0;font-size:13px">Nenhuma ação no período ainda.</div>';
+  const W=640, RH=34, H=list.length*RH+12;
+  const max = Math.max(1, ...list.map(r=>r.val));
+  let s = '';
+  list.forEach(function(r,i){
+    const y = i*RH+8, bw = Math.max(4, (W-330)*r.val/max);
+    s += '<rect x="190" y="'+y+'" width="'+bw+'" height="20" rx="4" fill="#d4a53f"><title>'+esc(r.nome)+': '+r.val+'</title></rect>';
+    s += '<text x="182" y="'+(y+14)+'" font-size="12" fill="#f7f3e9" text-anchor="end">'+esc(r.nome)+(i===0 && r.val>0 ? ' 👑' : '')+'</text>';
+    s += '<text x="'+(196+bw)+'" y="'+(y+14)+'" font-size="11" fill="#a8b0a0">'+esc(r.sub)+'</text>';
+  });
+  return '<svg width="100%" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet" role="img">'+s+'</svg>';
+}
+function rankPeriodHtml(p){
+  return chartCard('✅ Onboarding (checks validados)', svgRank(p.onb))
+    + chartCard('🛒 Recuperação (assumidos · conquistados · taxa)', svgRank(p.rec))
+    + chartCard('🔥 Atividade (ações no sistema)', svgRank(p.tot));
+}
+function rankingDrawerHtml(){
+  const hoje = rankPer(startOfToday()), d7 = rankPer(Date.now() - 7*86400000);
+  return '<div class=charts id=ranking-drawer><div class=charts-head><h3>🏆 Ranking do Time</h3><a id=rank-close class=btn-close href=#>✕ Fechar</a></div>'
+    + '<div class=rkbtns><a href=# class="rk-btn on" data-p=hoje>Hoje</a><a href=# class=rk-btn data-p=d7>7 dias</a></div>'
+    + '<div id=rk-hoje>' + rankPeriodHtml(hoje) + '</div>'
+    + '<div id=rk-d7 hidden>' + rankPeriodHtml(d7) + '</div></div>';
+}
+
 function usersCardHtml(req){
   const usersAll = db.prepare('SELECT nome, status, role, criado_em FROM users ORDER BY id ASC').all();
   let urows = '';
@@ -698,6 +743,10 @@ table.recov td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}
 .btn-close{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--gold);color:#1a1033;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;line-height:1.4}
 @media(max-width:640px){.charts.open{inset:0;top:0;left:0;transform:none;width:100%;max-height:100%;border-radius:0;padding:12px 16px}}
 .btn:hover{filter:brightness(1.08)}
+.rkbtns{display:flex;gap:8px;margin:4px 0}
+.rkbtns a{padding:6px 16px;border-radius:999px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:12px;font-weight:600;line-height:1.4}
+.rkbtns a:hover{background:rgba(212,165,63,.1)}
+.rkbtns a.on{background:var(--gold);color:#1a1033;border-color:var(--gold);font-weight:700}
 .tabs{display:flex;gap:8px;margin:14px 0 0;flex-wrap:wrap}
 .tabs a.tab{padding:8px 20px;border-radius:999px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;font-weight:600;line-height:1.4}
 .tabs a.tab:hover{background:rgba(212,165,63,.1)}
@@ -726,7 +775,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <div class="card kpi"><div class=lbl>⚠️ Onboarding pendente</div><div class=val>__OBP__</div><div class=sub>vendas pagas sem checklist completo</div></div>
 <div class="card kpi"><div class=lbl>🛠️ Recuperação</div><div class=val>__RCV__</div><div class=sub>__RCVC__ conquistados · __RCVP__% conversão</div></div>
 </div>
-<div class=chartbar><a id=btn-charts class=btn-charts href=#>📈 Gráficos · __CHARTMINI__</a></div>
+<div class=chartbar><a id=btn-charts class=btn-charts href=#>📈 Gráficos · __CHARTMINI__</a><a id=btn-ranking class=btn-charts href=#>🏆 Ranking</a></div>
 <div class=bar>
 <div class=filters><a href="/?evento=todos" class="__C0__">Todos</a><a href="/?evento=venda.paga" class="__C1__">Pagas</a><a href="/?evento=carrinho.abandonado" class="__C2__">Abandonados</a></div>
 <input id=q placeholder="Buscar por nome, whatsapp ou produto…" oninput="fltr()">
@@ -736,6 +785,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <div id=sec-auditoria hidden>__AUDIT__</div>
 <div id=feed>__FEED__</div></div>
 <div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART__</div>
+__RANK__
 </div>
 <script>
 function nowClock(){return new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})}
@@ -762,6 +812,16 @@ function applyCharts(){var open=sessionStorage.getItem('legacy_charts')==='1';dr
 btnC.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts',sessionStorage.getItem('legacy_charts')==='1'?'0':'1');applyCharts();});
 document.getElementById('charts-close').addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts','0');applyCharts();});
 applyCharts();
+})();
+(function(){
+var rdrawer=document.getElementById('ranking-drawer'),btnR=document.getElementById('btn-ranking');
+if(!rdrawer||!btnR)return;
+function applyRankP(){var p=sessionStorage.getItem('legacy_rankp')||'hoje';document.getElementById('rk-hoje').hidden=p!=='hoje';document.getElementById('rk-d7').hidden=p!=='d7';document.querySelectorAll('.rk-btn').forEach(function(b){b.classList.toggle('on',b.dataset.p===p)})}
+function applyRank(){var open=sessionStorage.getItem('legacy_rank')==='1';rdrawer.classList.toggle('open',open);btnR.classList.toggle('on',open);applyRankP()}
+btnR.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_rank',sessionStorage.getItem('legacy_rank')==='1'?'0':'1');applyRank();});
+document.getElementById('rank-close').addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_rank','0');applyRank();});
+document.querySelectorAll('.rk-btn').forEach(function(b){b.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_rankp',b.dataset.p);applyRankP();})});
+applyRank();
 })();
 setTimeout(()=>{location.href=location.pathname+(location.search||'')},15000);
 </script></body></html>`;
@@ -908,6 +968,7 @@ app.get('/', (req,res)=>{
     .replace('__EVENC__', encodeURIComponent(filtro))
     .replace('__CHARTMINI__', stats.pagasDia + (stats.pagasDia===1 ? ' venda hoje' : ' vendas hoje'))
     .replace('__CHART__', salesChart() + recoveryTable())
+    .replace('__RANK__', rankingDrawerHtml())
     .replace('__TABS__', tabs)
     .replace('__ADMINBADGE__', adminBadge)
     .replace('__ADMIN__', adminHtml)
