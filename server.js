@@ -63,6 +63,55 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;
 app.use(express.json({limit:'2mb'}));
 app.use(express.text({type:'*/*', limit:'2mb'}));
 
+// ===================== LOGIN (Opção A: senha + cookie assinado) =====================
+const PAINEL_PASSWORD = process.env.PAINEL_PASSWORD || 'L3g@cy';
+const AUTH_SECRET = process.env.PAINEL_SECRET || 'legacy-painel-secret-v1';
+const AUTH_COOKIE = 'painel_auth';
+function authToken(){ return crypto.createHmac('sha256', AUTH_SECRET).update(PAINEL_PASSWORD).digest('hex'); }
+function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
+function isValidAuth(req){
+  const m = new RegExp('(?:^|;\\s*)' + AUTH_COOKIE + '=([a-f0-9]{64})').exec(req.headers.cookie || '');
+  return !!m && safeEq(m[1], authToken());
+}
+function loginPage(err){
+  return '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Acesso restrito</title><meta name=viewport content="width=device-width,initial-scale=1"><style>' +
+  'body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#17251d,#1b2c22,#17251d);color:#f7f3e9}' +
+  '.card{background:#213629;border:1px solid rgba(212,165,63,.45);border-radius:14px;padding:38px 42px;box-shadow:0 10px 30px rgba(0,0,0,.5);text-align:center;min-width:300px}' +
+  'h1{font-size:24px;font-weight:800;letter-spacing:6px;margin:0 0 4px;background:linear-gradient(90deg,#d4a53f,#eecf7e,#cd8900);-webkit-background-clip:text;background-clip:text;color:transparent}' +
+  'p{color:#c2bfa8;font-size:13px;margin:0 0 22px;letter-spacing:1px}' +
+  'input{width:100%;padding:11px 14px;border-radius:10px;border:1px solid rgba(212,175,55,.4);background:#17251d;color:#f7f3e9;font-size:14px;outline:none;box-sizing:border-box;text-align:center}' +
+  'input:focus{border-color:#d4a53f;box-shadow:0 0 0 2px rgba(212,175,55,.25)}' +
+  'button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:10px;background:linear-gradient(90deg,#d4a53f,#cd8900);color:#1a1033;font-weight:700;font-size:14px;cursor:pointer}' +
+  'button:hover{filter:brightness(1.1)}' +
+  '.err{color:#e08a8a;font-size:12px;margin-top:12px;min-height:14px}' +
+  '</style></head><body><div class=card><h1>LEGACY</h1><p>Acesso restrito</p>' +
+  '<form method=post action=/login><input type=password name=senha placeholder="Senha" autofocus required><button>Entrar</button>' +
+  '<div class=err>' + (err ? 'Senha incorreta. Tente novamente.' : '') + '</div></form></div></body></html>';
+}
+// Middleware: tudo exige cookie, EXCETO webhook (EVO não autentica) e login/logout
+app.use((req,res,next)=>{
+  if (req.path.startsWith('/hook/')) return next();
+  if (req.method==='POST' && (req.path==='/login' || req.path==='/logout')) return next();
+  if (req.path==='/favicon.ico') return res.status(404).end();
+  if (isValidAuth(req)) return next();
+  res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
+  return res.send(loginPage(req.query && req.query.erro ? true : false));
+});
+app.post('/login', (req,res)=>{
+  let senha = '';
+  const raw = typeof req.body === 'string' ? req.body : (req.body && req.body.senha ? req.body.senha : '');
+  if (typeof raw === 'string'){ try { senha = new URLSearchParams(raw).get('senha') || ''; } catch(e){ senha = raw; } }
+  if (safeEq(senha, PAINEL_PASSWORD)){
+    res.setHeader('Set-Cookie', AUTH_COOKIE + '=' + authToken() + '; Max-Age=2592000; HttpOnly; Path=/');
+    return res.redirect(302, '/');
+  }
+  return res.redirect(302, '/?erro=1');
+});
+app.post('/logout', (req,res)=>{
+  res.setHeader('Set-Cookie', AUTH_COOKIE + '=; Max-Age=0; HttpOnly; Path=/');
+  return res.redirect(302, '/');
+});
+
 // Recebe QUALQUER POST em /hook/:origem — responde 200 sempre
 app.post('/hook/:origem', (req,res)=>{
   let body = req.body;
@@ -211,7 +260,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 .empty{color:var(--mut);text-align:center;padding:40px 0;font-size:15px}
 @media(max-width:640px){header{padding:14px 16px}.kpis{grid-template-columns:repeat(2,1fr);margin:-18px 14px 0;gap:10px}main{padding:16px 14px 30px}h1{font-size:20px;letter-spacing:4px}.kpi .val{font-size:20px}}
 </style></head><body>
-<header><div class=htop><h1>LEGACY</h1><span class=sub>· Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span></div></div></header>
+<header><div class=htop><h1>LEGACY</h1><span class=sub>· Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><form action=/logout method=post style=display:none id=lo></form><a href="#" onclick="document.getElementById('lo').submit();return false" style="color:#c2bfa8;font-size:12px;margin-left:12px;text-decoration:none">sair</a></div></div></header>
 <div class=kpis>
 <div class=kpi><div class=lbl>💰 Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
 <div class=kpi><div class=lbl>✅ Vendas pagas hoje</div><div class=val>__PGD__</div><div class=sub>__PGT__ no total</div></div>
