@@ -43,7 +43,16 @@ const SCHEMA = [
 '  detalhe TEXT,',
 '  ts TEXT NOT NULL',
 ');',
-'CREATE INDEX IF NOT EXISTS idx_acoes_event ON acoes(event_id, acao);'
+'CREATE INDEX IF NOT EXISTS idx_acoes_event ON acoes(event_id, acao);',
+'CREATE TABLE IF NOT EXISTS auditoria (',
+'  id INTEGER PRIMARY KEY AUTOINCREMENT,',
+'  ts TEXT NOT NULL,',
+'  usuario TEXT,',
+'  acao TEXT NOT NULL,',
+'  sobre TEXT,',
+'  detalhe TEXT',
+');',
+'CREATE INDEX IF NOT EXISTS idx_auditoria_ts ON auditoria(ts);',
 ].join('\n');
 db.exec(SCHEMA);
 try { db.exec("ALTER TABLE users ADD COLUMN salt TEXT NOT NULL DEFAULT ''"); } catch(e) {}
@@ -94,6 +103,8 @@ function makePinHash(pin){ const salt = crypto.randomBytes(16).toString('hex'); 
 function checkPin(pin, stored){ try { const parts = String(stored).split(':'); const h = hashPin(pin, parts[0]); return !!parts[1] && crypto.timingSafeEqual(Buffer.from(h,'hex'), Buffer.from(parts[1],'hex')); } catch(e){ return false; } }
 function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
 const usersCount = () => db.prepare('SELECT COUNT(*) c FROM users').get().c;
+function logAud(usuario, acao, sobre, detalhe){ try { db.prepare('INSERT INTO auditoria (ts, usuario, acao, sobre, detalhe) VALUES (?,?,?,?,?)').run(new Date().toISOString(), usuario==null?null:String(usuario), String(acao), sobre==null?null:String(sobre).slice(0,200), detalhe==null?null:String(detalhe).slice(0,500)); } catch(e){ console.error('auditoria:', e.message); } }
+function adminCountExcept(nome){ return db.prepare("SELECT COUNT(*) c FROM users WHERE role='admin' AND nome != ?").get(nome).c; }
 
 function sign(payload){ return crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex'); }
 function makeToken(user){
@@ -145,19 +156,19 @@ function loginPage(err, mode){
     return pageShell('Criar acesso',
       '<p>Primeiro acesso · crie seu acesso</p>' +
       '<form method=post action=/login/criar>' +
-      '<input type=text name=nome placeholder="Seu nome" autofocus required maxlength=40>' +
-      '<input type=password name=pin placeholder="PIN (4 dígitos)" required inputmode=numeric maxlength=4 style="margin-top:12px">' +
-      '<button>Criar meu acesso</button><div class=err>' + (err ? 'Nome já existe ou PIN inválido (4 dígitos).' : '') + '</div></form>');
+      '<input type=text name=nome placeholder="Seu nome" autofocus required maxlength=60>' +
+      '<input type=password name=pin placeholder="PIN (6 dígitos)" required inputmode=numeric maxlength=6 style="margin-top:12px">' +
+      '<button>Criar meu acesso</button><div class=err>' + (err ? 'Nome já existe ou PIN inválido (6 dígitos).' : '') + '</div></form>');
   }
   return pageShell('Acesso restrito',
     '<form method=post action=/login>' +
-    '<input type=text name=nome placeholder="Nome" autofocus required maxlength=40>' +
-    '<input type=password name=pin placeholder="PIN (4 dígitos)" required inputmode=numeric maxlength=4 style="margin-top:12px">' +
-    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Nome já existe ou PIN inválido (4 dígitos).' : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : '')))))) + '</div></form>' +
+    '<input type=text name=nome placeholder="Nome" autofocus required maxlength=60>' +
+    '<input type=password name=pin placeholder="PIN (6 dígitos)" required inputmode=numeric maxlength=6 style="margin-top:12px">' +
+    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Nome já existe ou PIN inválido (6 dígitos).' : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : (err==='bloqueado' ? 'Acesso bloqueado. Fale com o administrador.' : ''))))))) + '</div></form>' +
     '<div class=alt><h2>SOU NOVO AQUI</h2>' +
     '<form method=post action=/login/novo>' +
-    '<input type=text name=nome placeholder="Seu nome" required maxlength=40>' +
-    '<input type=password name=pin placeholder="PIN (4 dígitos)" required inputmode=numeric maxlength=4 style="margin-top:12px">' +
+    '<input type=text name=nome placeholder="Seu nome" required maxlength=60>' +
+    '<input type=password name=pin placeholder="PIN (6 dígitos)" required inputmode=numeric maxlength=6 style="margin-top:12px">' +
     '<button>Criar acesso</button><div class=hint>Seu cadastro ficará aguardando aprovação do admin.</div></form></div>');
 }
 // Middleware: tudo exige cookie, EXCETO webhook (EVO não autentica) e login/logout
@@ -167,7 +178,7 @@ app.use((req,res,next)=>{
   if (req.path==='/favicon.ico') return res.status(404).end();
   const user = getAuth(req);
   if (user){ req.user = user; return next(); }
-  const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar', 'pendente':'pendente', 'existe':'existe', 'ok':'ok' };
+  const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar', 'pendente':'pendente', 'existe':'existe', 'ok':'ok', 'bloqueado':'bloqueado' };
   res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
   return res.send(loginPage(errMap[req.query && req.query.erro] || '', req.query && req.query.modo === 'criar' ? 'criar' : undefined));
 });
@@ -179,17 +190,21 @@ function formFields(req){
 }
 app.post('/login', (req,res)=>{
   const f = formFields(req);
-  const u = db.prepare('SELECT * FROM users WHERE nome = ?').get(String(f.nome||'').trim());
+  const nomeL = String(f.nome||'').trim();
+  const u = db.prepare('SELECT * FROM users WHERE nome = ?').get(nomeL);
   if (u && u.status === 'pendente') return res.redirect(302, '/?erro=pendente');
-  if (u && u.status === 'ativo' && checkPin(f.pin, u.pin_hash)){ setAuthCookie(res, u); return res.redirect(302, '/'); }
+  if (u && u.status === 'bloqueado'){ logAud(nomeL, 'login_bloqueado', nomeL); return res.redirect(302, '/?erro=bloqueado'); }
+  if (u && u.status === 'ativo' && checkPin(f.pin, u.pin_hash)){ logAud(nomeL, 'login_ok', nomeL); setAuthCookie(res, u); return res.redirect(302, '/'); }
+  logAud(nomeL, 'login_falho', nomeL);
   return res.redirect(302, '/?erro=1');
 });
 app.post('/login/criar', (req,res)=>{
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
-  if (usersCount() > 0 || !nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=1&modo=criar');
+  if (usersCount() > 0 || !nome || !/^\d{6}$/.test(f.pin)) return res.redirect(302, '/?erro=1&modo=criar');
   try {
     const stored = makePinHash(f.pin); const info = db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
+    logAud(nome, 'cadastro_criado', nome, 'primeiro acesso (admin)');
     setAuthCookie(res, { id: info.lastInsertRowid, nome });
     return res.redirect(302, '/');
   } catch(e){ return res.redirect(302, '/?erro=1&modo=criar'); }
@@ -197,10 +212,11 @@ app.post('/login/criar', (req,res)=>{
 app.post('/login/novo', (req,res)=>{
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
-  if (!nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=existe');
+  if (!nome || !/^\d{6}$/.test(f.pin)) return res.redirect(302, '/?erro=existe');
   try {
     const stored = makePinHash(f.pin);
     db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
+    logAud(nome, 'cadastro_criado', nome, 'aguardando aprovacao');
     return res.redirect(302, '/?erro=ok');
   } catch(e){ return res.redirect(302, '/?erro=existe'); }
 });
@@ -215,6 +231,7 @@ app.post('/admin/aprovar', (req,res)=>{
   if (!u) return res.status(404).json({ok:false, erro:'cadastro_nao_encontrado'});
   db.prepare("UPDATE users SET status='ativo' WHERE id=?").run(u.id);
   db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)').run('cadastro', req.user.nome, 'aprovar_cadastro', nome, new Date().toISOString());
+  logAud(req.user.nome, 'aprovado', nome);
   res.json({ok:true});
 });
 app.post('/admin/rejeitar', (req,res)=>{
@@ -224,7 +241,86 @@ app.post('/admin/rejeitar', (req,res)=>{
   if (!u) return res.status(404).json({ok:false, erro:'cadastro_nao_encontrado'});
   db.prepare('DELETE FROM users WHERE id=?').run(u.id);
   db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)').run('cadastro', req.user.nome, 'rejeitar_cadastro', nome, new Date().toISOString());
+  logAud(req.user.nome, 'rejeitado', nome);
   res.json({ok:true});
+});
+app.post('/admin/editar_nome', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const b = req.body||{};
+  const nome = String(b.nome||'').trim(), novo = String(b.novo_nome||'').trim();
+  if (!nome || !novo || nome===novo) return res.status(400).json({ok:false, erro:'parametros_invalidos'});
+  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
+  if (db.prepare('SELECT 1 FROM users WHERE nome=?').get(novo)) return res.status(409).json({ok:false, erro:'nome_ja_existe'});
+  db.prepare('UPDATE users SET nome=? WHERE id=?').run(novo, u.id);
+  logAud(req.user.nome, 'nome_editado', nome, 'novo nome: ' + novo);
+  res.json({ok:true});
+});
+app.post('/admin/resetar_pin', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const nome = String((req.body||{}).nome||'').trim();
+  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
+  const pin = String(Math.floor(100000 + Math.random()*900000));
+  const stored = makePinHash(pin);
+  db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(stored, stored.split(':')[0], u.id);
+  logAud(req.user.nome, 'pin_reset', nome);
+  res.json({ok:true, pin});
+});
+app.post('/admin/bloquear', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const b = req.body||{}; const nome = String(b.nome||'').trim();
+  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
+  const bloquear = !(b.bloquear === false || b.bloquear === 'false');
+  if (bloquear){
+    if (u.nome === req.user.nome) return res.status(403).json({ok:false, erro:'nao_pode_bloquear_a_si_mesmo'});
+    if (u.role === 'admin' && adminCountExcept(nome) === 0) return res.status(403).json({ok:false, erro:'ultimo_admin'});
+    db.prepare("UPDATE users SET status='bloqueado' WHERE id=?").run(u.id);
+    logAud(req.user.nome, 'bloqueado', nome);
+  } else {
+    db.prepare("UPDATE users SET status='ativo' WHERE id=?").run(u.id);
+    logAud(req.user.nome, 'desbloqueado', nome);
+  }
+  res.json({ok:true});
+});
+app.post('/admin/excluir', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const nome = String((req.body||{}).nome||'').trim();
+  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
+  if (u.nome === req.user.nome) return res.status(403).json({ok:false, erro:'nao_pode_excluir_a_si_mesmo'});
+  if (u.role === 'admin' && adminCountExcept(nome) === 0) return res.status(403).json({ok:false, erro:'ultimo_admin'});
+  db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+  logAud(req.user.nome, 'excluido', nome);
+  res.json({ok:true});
+});
+app.get('/auditoria', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const fUsuario = String(req.query.usuario||''), fTipo = String(req.query.tipo||'');
+  let sql = 'SELECT * FROM auditoria WHERE 1=1'; const params=[];
+  if (fUsuario){ sql += ' AND usuario=?'; params.push(fUsuario); }
+  if (fTipo){ sql += ' AND acao=?'; params.push(fTipo); }
+  sql += ' ORDER BY id DESC LIMIT 500';
+  const rows = db.prepare(sql).all(...params);
+  const usuarios = db.prepare('SELECT DISTINCT usuario FROM auditoria ORDER BY usuario').all().map(r=>r.usuario).filter(Boolean);
+  const tipos = db.prepare('SELECT DISTINCT acao FROM auditoria ORDER BY acao').all().map(r=>r.acao);
+  res.setHeader('Content-Type','text/html; charset=utf-8');
+  res.send(auditoriaPage(rows, usuarios, tipos, fUsuario, fTipo));
+});
+app.get('/auditoria.csv', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const fUsuario = String(req.query.usuario||''), fTipo = String(req.query.tipo||'');
+  let sql = 'SELECT * FROM auditoria WHERE 1=1'; const params=[];
+  if (fUsuario){ sql += ' AND usuario=?'; params.push(fUsuario); }
+  if (fTipo){ sql += ' AND acao=?'; params.push(fTipo); }
+  sql += ' ORDER BY id ASC';
+  const rows = db.prepare(sql).all(...params);
+  const lines = ['data_hora_fortaleza,usuario,acao,sobre,detalhe'];
+  for (const r of rows) lines.push([fmtDT(r.ts), r.usuario, r.acao, r.sobre, r.detalhe].map(csvField).join(','));
+  res.setHeader('Content-Type','text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition','attachment; filename="auditoria.csv"');
+  res.send('\ufeff' + lines.join('\r\n'));
 });
 app.post('/logout', (req,res)=>{
   res.setHeader('Set-Cookie', AUTH_COOKIE + '=; Max-Age=0; HttpOnly; Path=/');
@@ -270,6 +366,7 @@ app.post('/api/acao', (req,res)=>{
   if (lastOfAcao && (b.acao === 'resultado_conquistou' || b.acao === 'resultado_nao')) return res.status(409).json({ok:false, erro:'resultado ja registrado (use toggle)'});
   db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
     .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString());
+  logAud(req.user.nome, b.acao, eventId, b.detalhe || null);
   res.json({ok:true});
 });
 app.post('/api/acao/toggle', (req,res)=>{
@@ -282,6 +379,7 @@ app.post('/api/acao/toggle', (req,res)=>{
   if (b.acao === 'claim_carrinho') return res.status(404).json({ok:false, erro:'nada_para_remover'});
   db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
     .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString());
+  logAud(req.user.nome, b.acao, eventId, b.detalhe || null);
   return res.json({ok:true, marcado:true});
 });
 
@@ -340,6 +438,12 @@ app.get('/export.csv', (req,res)=>{
   res.setHeader('Content-Disposition','attachment; filename="vendas-legacy.csv"');
   res.send('\ufeff' + lines.join('\r\n'));
 });
+
+function auditoriaPage(rows, usuarios, tipos, fUsuario, fTipo){
+  const opt = (list, sel) => '<option value="">todos</option>' + list.map(v=>'<option'+(v===sel?' selected':'')+' value="'+esc(v)+'">'+esc(v)+'</option>').join('');
+  const trs = rows.map(r=>'<tr><td>'+esc(fmtDT(r.ts))+'</td><td>'+esc(r.usuario||'-')+'</td><td>'+esc(r.acao)+'</td><td>'+esc(r.sobre||'')+'</td><td>'+esc(r.detalhe||'')+'</td></tr>').join('');
+  return '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Auditoria</title><meta name=viewport content="width=device-width,initial-scale=1"><style>body{font-family:system-ui,sans-serif;margin:0;background:#17251d;color:#f7f3e9;font-size:13px;line-height:1.5}.wrap{max-width:1100px;margin:0 auto;padding:24px}h1{color:#eecf7e;letter-spacing:3px;font-size:22px;margin:0 0 8px}select,button{padding:6px 10px;border-radius:8px;border:1px solid rgba(212,165,63,.4);background:#17251d;color:#f7f3e9;cursor:pointer}button{background:#d4a53f;color:#1a1033;font-weight:600}table{width:100%;border-collapse:collapse;margin-top:16px}th{color:#a8b0a0;text-align:left;padding:6px 8px;border-bottom:1px solid rgba(212,165,63,.25)}td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}a{color:#eecf7e}</style></head><body><div class=wrap><h1>📜 AUDITORIA</h1><p><a href="/">← voltar ao painel</a> · <a href="/auditoria.csv">⬇️ baixar CSV</a></p><form method=get style="margin-top:12px"><select name=usuario>'+opt(usuarios,fUsuario)+'</select> <select name=tipo>'+opt(tipos,fTipo)+'</select> <button>Filtrar</button></form><table><tr><th>Data/hora (Fortaleza)</th><th>Quem</th><th>O quê</th><th>Sobre quem</th><th>Detalhe</th></tr>' + (trs || '<tr><td colspan=5 style="color:#a8b0a0">Sem registros.</td></tr>') + '</table></div></body></html>';
+}
 
 // ===================== TIMEZONE (exibicao em America/Fortaleza) =====================
 const TZ = 'America/Fortaleza';
@@ -438,6 +542,31 @@ function recoveryTable(){
   for (const r of rows) html += '<tr><td>'+esc(r.nome)+'</td><td>'+r.a+'</td><td>'+r.c+'</td><td>'+r.pct+'%</td></tr>';
   html += '</table>';
   return chartCard('Recuperação por pessoa', html);
+}
+
+function usersCardHtml(req){
+  const usersAll = db.prepare('SELECT nome, status, role, criado_em FROM users ORDER BY id ASC').all();
+  let urows = '';
+  for (const uu of usersAll){
+    const self = uu.nome === req.user.nome;
+    urows += '<tr><td>' + esc(uu.nome) + (self ? ' <span class="badge b-gray">você</span>' : '') + '</td>'
+      + '<td>' + (uu.status==='ativo' ? '<span class="badge b-green">ativo</span>' : uu.status==='pendente' ? '<span class="badge b-orange">pendente</span>' : '<span class="badge b-gray">bloqueado</span>') + '</td>'
+      + '<td>' + (uu.role==='admin' ? '🛡️ admin' : 'membro') + '</td>'
+      + '<td style="text-align:right;white-space:nowrap">';
+    const bstyle = 'margin:0 4px 0 0;background:transparent;color:var(--gold2);border:1px solid var(--line)';
+    urows += '<button class=btn style="'+bstyle+'" onclick="admEditarNome(&#39;' + esc(uu.nome) + '&#39;)">✏️ nome</button>'
+      + '<button class=btn style="'+bstyle+'" onclick="admResetPin(&#39;' + esc(uu.nome) + '&#39;)">🔑 PIN</button>';
+    if (!self){
+      if (uu.status==='ativo' || uu.status==='pendente'){
+        urows += '<button class=btn style="margin:0 4px 0 0;background:transparent;color:#ffc46b;border:1px solid var(--line)" onclick="admBloquear(&#39;' + esc(uu.nome) + '&#39;,true)">🚫 bloquear</button>';
+      } else {
+        urows += '<button class=btn style="margin:0 4px 0 0;background:#39d98a" onclick="admBloquear(&#39;' + esc(uu.nome) + '&#39;,false)">✅ desbloquear</button>';
+      }
+      urows += '<button class=btn style="margin:0;background:#b04a4a;color:#fff" onclick="admExcluir(&#39;' + esc(uu.nome) + '&#39;)">🗑️ excluir</button>';
+    }
+    urows += '</td></tr>';
+  }
+  return '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Usuários (' + usersAll.length + ')</h3><table class=recov><tr><th>Nome</th><th>Status</th><th>Papel</th><th></th></tr>' + urows + '</table><p style="margin:12px 0 0"><a class=btn-csv href="/auditoria">📜 Auditoria</a></p></div>';
 }
 
 function startOfToday(){ return Date.parse(localDay(Date.now()) + 'T00:00:00-03:00'); } // meia-noite America/Fortaleza (UTC-3, sem DST)
@@ -567,6 +696,11 @@ function doAcao(ev,acao,detalhe){postAcao('/api/acao',{event_id:ev,acao:acao,det
 function doAdmin(act,nome){postAcao('/admin/'+act,{nome:nome})}
 function undoAcao(ev,acao){postAcao('/api/acao/toggle',{event_id:ev,acao:acao})}
 (function(){
+function adminPost(url,data,cb){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json()).then(j=>{if(j.ok){if(cb){cb(j)}else{location.reload()}}else{alert(j.erro||'Erro')}}).catch(e=>alert('Erro de rede'))}
+function admEditarNome(nome){var n=prompt('Novo nome para '+nome+':',nome);if(n&&n.trim()&&n!==nome)adminPost('/admin/editar_nome',{nome:nome,novo_nome:n.trim()})}
+function admResetPin(nome){if(confirm('Resetar PIN de '+nome+'? Um novo PIN de 6 dígitos será gerado.'))adminPost('/admin/resetar_pin',{nome:nome},function(j){alert('Novo PIN de '+nome+': '+j.pin)})}
+function admBloquear(nome,bloq){adminPost('/admin/bloquear',{nome:nome,bloquear:bloq})}
+function admExcluir(nome){if(confirm('Excluir usuário '+nome+'? As ações antigas permanecem na auditoria.'))adminPost('/admin/excluir',{nome:nome})}
 var drawer=document.getElementById('charts-drawer'),btnC=document.getElementById('btn-charts');
 function applyCharts(){var open=sessionStorage.getItem('legacy_charts')==='1';drawer.classList.toggle('open',open);btnC.classList.toggle('on',open);}
 btnC.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts',sessionStorage.getItem('legacy_charts')==='1'?'0':'1');applyCharts();});
@@ -611,7 +745,8 @@ app.get('/', (req,res)=>{
 
   const card = (e)=>{
     const b = e.body || {};
-    if (!b.webhook_evento){
+    const isEvo = String(e.origem||'').startsWith('evo-');
+    if (!b.webhook_evento && !isEvo){
       return '<div class=ev data-s="'+esc(JSON.stringify(b).toLowerCase())+'"><div class=meta>#'+esc(e.id)+' · <b>'+esc(e.origem)+'</b> · '+fmtCardDT(e.ts)+'</div><details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
     }
     const cli = b.cliente || {}, prod = b.produto || {}, venda = b.venda || {}, c = b.carrinho || {};
@@ -622,7 +757,7 @@ app.get('/', (req,res)=>{
     const waLink = wa ? '<a href="https://wa.me/'+esc(wa)+'" target=_blank rel=noopener>📱 '+esc(cli.whatsapp)+'</a>' : (cli.whatsapp? '📱 '+esc(cli.whatsapp):'');
     let extra = '';
     const list = amap[e.id] || [];
-    if (b.webhook_evento === 'venda.paga'){
+    if (b.webhook_evento === 'venda.paga' || !b.webhook_evento){
       const v = Number(c.total_venda) || Number(b.valor);
       if (v) extra += '<div class=hl>💰 '+fmtBRL(v, c.moeda)+'</div>';
       const ob = onboardingInfo(list);
@@ -640,7 +775,7 @@ app.get('/', (req,res)=>{
       }
       extra += '</div>';
     }
-    if (b.webhook_evento === 'carrinho.abandonado'){
+    if (b.webhook_evento === 'carrinho.abandonado' || !b.webhook_evento){
       const mins = c.criado_em ? Math.max(0,Math.floor((Date.now()-new Date(c.criado_em).getTime())/60000)) : null;
       if (c.total_venda) extra += '<div class=hl>💰 '+fmtBRL(c.total_venda, c.moeda)+(mins!=null?' · há '+mins+' min':'')+'</div>';
       else if (mins!=null) extra += '<div class=hl>há '+mins+' min</div>';
@@ -694,6 +829,7 @@ app.get('/', (req,res)=>{
         + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table></div>';
     }
   }
+  if (isAdmin) adminHtml += usersCardHtml(req);
   const cls = f => (filtro===f?'on':'');
   let out = PAGE
     .replace('__USER__', esc(req.user ? req.user.nome : ''))
