@@ -295,6 +295,20 @@ app.post('/admin/excluir', (req,res)=>{
   logAud(req.user.nome, 'excluido', nome);
   res.json({ok:true});
 });
+// Usuario troca o PROPRIO PIN (logado)
+app.post('/me/trocar_pin', (req,res)=>{
+  if (!requireUser(req,res)) return;
+  const b = req.body || {};
+  const atual = String(b.pin_atual||''), novo = String(b.pin_novo||'');
+  if (!/^\d{6}$/.test(novo)) return res.status(400).json({ok:false, erro:'pin_invalido'});
+  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
+  if (!u || !checkPin(atual, u.pin_hash)) return res.status(403).json({ok:false, erro:'pin_atual_incorreto'});
+  const stored = makePinHash(novo);
+  db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(stored, stored.split(':')[0], u.id);
+  logAud(u.nome, 'pin_trocado_proprio', u.nome);
+  res.json({ok:true});
+});
+
 app.get('/auditoria', (req,res)=>{
   if (!requireAdmin(req,res)) return;
   const fUsuario = String(req.query.usuario||''), fTipo = String(req.query.tipo||'');
@@ -439,10 +453,43 @@ app.get('/export.csv', (req,res)=>{
   res.send('\ufeff' + lines.join('\r\n'));
 });
 
+// ===== Auditoria: descricao legivel + resumo do dia =====
+const ACAO_TXT = {
+  login_ok:['entrou no sistema',''], login_falho:['tentou entrar (PIN incorreto)',''], login_bloqueado:['tentou entrar (bloqueado)',''],
+  cadastro_criado:['criou o cadastro',''], aprovado:['aprovou o cadastro de','nome'], rejeitado:['rejeitou o cadastro de','nome'],
+  nome_editado:['editou o nome de','nome'], pin_reset:['resetou o PIN de','nome'], pin_trocado_proprio:['trocou o próprio PIN',''],
+  bloqueado:['bloqueou','nome'], desbloqueado:['desbloqueou','nome'], excluido:['excluiu','nome'],
+  check_boasvindas:['validou boas-vindas da venda','id'], check_removido_vip:['validou remoção do VIP da venda','id'], check_onboarding_ok:['validou onboarding da venda','id'],
+  claim_carrinho:['assumiu o carrinho da venda','id'], resultado_conquistou:['✅ conquistou a venda','id'], resultado_nao:['❌ não conquistou a venda','id'], nota:['anotou na venda','id']
+};
+function auditDesc(r){
+  const def = ACAO_TXT[r.acao];
+  if (!def) return (r.usuario||'-') + ' · ' + r.acao + (r.sobre ? ' ('+r.sobre+')' : '') + (r.detalhe ? ' — '+r.detalhe : '');
+  let s = (r.usuario||'-') + ' ' + def[0];
+  if (def[1]==='id' && r.sobre) s += ' #' + r.sobre;
+  else if (def[1]==='nome' && r.sobre) s += ' ' + r.sobre;
+  if (r.acao==='nota' && r.detalhe) s += ': “' + r.detalhe + '”';
+  return s;
+}
+function auditResumo(){
+  const t0 = new Date(startOfToday()).toISOString();
+  const m = {};
+  for (const r of db.prepare('SELECT acao, COUNT(*) c FROM auditoria WHERE ts >= ? GROUP BY acao').all(t0)) m[r.acao]=r.c;
+  const sum = keys => keys.reduce((s,k)=>s+(m[k]||0),0);
+  return { logins: sum(['login_ok']), checks: sum(['check_boasvindas','check_removido_vip','check_onboarding_ok']), claims: sum(['claim_carrinho']), resultados: sum(['resultado_conquistou','resultado_nao']) };
+}
+function auditResumoHtml(){
+  const r = auditResumo();
+  const pl = (n,s)=> n===1 ? s : s+'s';
+  return '<div style="margin:12px 0;padding:10px 14px;border-radius:10px;background:#213629;border:1px solid rgba(212,165,63,.25)">📌 <b>Hoje:</b> '+r.logins+' '+pl(r.logins,'login')+', '+r.checks+' '+pl(r.checks,'check')+' validado'+(r.checks===1?'':'s')+', '+r.claims+' carrinh'+(r.claims===1?'o':'os')+' assumid'+(r.claims===1?'o':'os')+', '+r.resultados+' resultado'+(r.resultados===1?'':'s')+'</div>';
+}
+function auditTableHtml(rows){
+  const trs = rows.map(r=>'<tr><td>'+esc(auditDesc(r))+'</td><td style="color:#a8b0a0;white-space:nowrap">'+esc(fmtHHMM(r.ts))+'</td></tr>').join('');
+  return '<table><tr><th>O que aconteceu</th><th style="width:70px">Hora</th></tr>' + (trs || '<tr><td colspan=2 style="color:#a8b0a0">Sem registros.</td></tr>') + '</table>';
+}
 function auditoriaPage(rows, usuarios, tipos, fUsuario, fTipo){
   const opt = (list, sel) => '<option value="">todos</option>' + list.map(v=>'<option'+(v===sel?' selected':'')+' value="'+esc(v)+'">'+esc(v)+'</option>').join('');
-  const trs = rows.map(r=>'<tr><td>'+esc(fmtDT(r.ts))+'</td><td>'+esc(r.usuario||'-')+'</td><td>'+esc(r.acao)+'</td><td>'+esc(r.sobre||'')+'</td><td>'+esc(r.detalhe||'')+'</td></tr>').join('');
-  return '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Auditoria</title><meta name=viewport content="width=device-width,initial-scale=1"><style>body{font-family:system-ui,sans-serif;margin:0;background:#17251d;color:#f7f3e9;font-size:13px;line-height:1.5}.wrap{max-width:1100px;margin:0 auto;padding:24px}h1{color:#eecf7e;letter-spacing:3px;font-size:22px;margin:0 0 8px}select,button{padding:6px 10px;border-radius:8px;border:1px solid rgba(212,165,63,.4);background:#17251d;color:#f7f3e9;cursor:pointer}button{background:#d4a53f;color:#1a1033;font-weight:600}table{width:100%;border-collapse:collapse;margin-top:16px}th{color:#a8b0a0;text-align:left;padding:6px 8px;border-bottom:1px solid rgba(212,165,63,.25)}td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}a{color:#eecf7e}</style></head><body><div class=wrap><h1>📜 AUDITORIA</h1><p><a href="/">← voltar ao painel</a> · <a href="/auditoria.csv">⬇️ baixar CSV</a></p><form method=get style="margin-top:12px"><select name=usuario>'+opt(usuarios,fUsuario)+'</select> <select name=tipo>'+opt(tipos,fTipo)+'</select> <button>Filtrar</button></form><table><tr><th>Data/hora (Fortaleza)</th><th>Quem</th><th>O quê</th><th>Sobre quem</th><th>Detalhe</th></tr>' + (trs || '<tr><td colspan=5 style="color:#a8b0a0">Sem registros.</td></tr>') + '</table></div></body></html>';
+  return '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Auditoria</title><meta name=viewport content="width=device-width,initial-scale=1"><style>body{font-family:system-ui,sans-serif;margin:0;background:#17251d;color:#f7f3e9;font-size:13px;line-height:1.5}.wrap{max-width:1100px;margin:0 auto;padding:24px}h1{color:#eecf7e;letter-spacing:3px;font-size:22px;margin:0 0 8px}select,button{padding:6px 10px;border-radius:8px;border:1px solid rgba(212,165,63,.4);background:#17251d;color:#f7f3e9;cursor:pointer}button{background:#d4a53f;color:#1a1033;font-weight:600}table{width:100%;border-collapse:collapse;margin-top:16px}th{color:#a8b0a0;text-align:left;padding:6px 8px;border-bottom:1px solid rgba(212,165,63,.25)}td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}a{color:#eecf7e}</style></head><body><div class=wrap><h1>📜 AUDITORIA</h1>' + auditResumoHtml() + '<p><a href="/">← voltar ao painel</a> · <a href="/auditoria.csv">⬇️ baixar CSV</a></p><form method=get style="margin-top:12px"><select name=usuario>'+opt(usuarios,fUsuario)+'</select> <select name=tipo>'+opt(tipos,fTipo)+'</select> <button>Filtrar</button></form>' + auditTableHtml(rows) + '</div></body></html>';
 }
 
 // ===================== TIMEZONE (exibicao em America/Fortaleza) =====================
@@ -651,6 +698,11 @@ table.recov td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}
 .btn-close{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--gold);color:#1a1033;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;line-height:1.4}
 @media(max-width:640px){.charts.open{inset:0;top:0;left:0;transform:none;width:100%;max-height:100%;border-radius:0;padding:12px 16px}}
 .btn:hover{filter:brightness(1.08)}
+.tabs{display:flex;gap:8px;margin:14px 0 0;flex-wrap:wrap}
+.tabs a.tab{padding:8px 20px;border-radius:999px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;font-weight:600;line-height:1.4}
+.tabs a.tab:hover{background:rgba(212,165,63,.1)}
+.tabs a.tab.on{background:var(--gold);color:#1a1033;border-color:var(--gold);font-weight:700}
+[hidden]{display:none!important}
 details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#cfd8c6;background:#122019;border-radius:8px;padding:12px}
 .empty{color:var(--mut);text-align:center;padding:40px 0;font-size:14px}
 @media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
@@ -664,8 +716,8 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 .ev{padding:12px 16px;margin-bottom:8px}
 }
 </style></head><body>
-<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span class=who>· __USER__</span>__ADMINBADGE__<form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div></div></div></header>
-<div class=wrap>
+<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span class=who>· __USER__</span>__ADMINBADGE__<form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="trocarPin();return false">🔑 Trocar meu PIN</a><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div><nav class=tabs>__TABS__</nav></div></header>
+<div class=wrap><div id=sec-vendas>
 <div class=kpis>
 <div class="card kpi"><div class=lbl>Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
 <div class="card kpi"><div class=lbl>Vendas pagas hoje</div><div class=val>__PGD__</div><div class=sub>__PGT__ no total</div></div>
@@ -680,8 +732,9 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <input id=q placeholder="Buscar por nome, whatsapp ou produto…" oninput="fltr()">
 <a class=btn-csv href="/export.csv?evento=__EVENC__">Exportar CSV</a>
 </div>
-__ADMIN__
-<div id=feed>__FEED__</div>
+<div id=sec-admin hidden>__ADMIN__</div>
+<div id=sec-auditoria hidden>__AUDIT__</div>
+<div id=feed>__FEED__</div></div>
 <div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART__</div>
 </div>
 <script>
@@ -701,6 +754,9 @@ function admEditarNome(nome){var n=prompt('Novo nome para '+nome+':',nome);if(n&
 function admResetPin(nome){if(confirm('Resetar PIN de '+nome+'? Um novo PIN de 6 dígitos será gerado.'))adminPost('/admin/resetar_pin',{nome:nome},function(j){alert('Novo PIN de '+nome+': '+j.pin)})}
 function admBloquear(nome,bloq){adminPost('/admin/bloquear',{nome:nome,bloquear:bloq})}
 function admExcluir(nome){if(confirm('Excluir usuário '+nome+'? As ações antigas permanecem na auditoria.'))adminPost('/admin/excluir',{nome:nome})}
+function setTab(t){var ok=false;document.querySelectorAll('.tab').forEach(function(a){var on=a.dataset.tab===t;if(on)ok=true;a.classList.toggle('on',on)});if(!ok)t='vendas';['sec-vendas','sec-admin','sec-auditoria'].forEach(function(id){var s=document.getElementById(id);if(s)s.hidden=id!=='sec-'+t});sessionStorage.setItem('legacy_tab',t)}
+(function(){var t=sessionStorage.getItem('legacy_tab')||'vendas';setTab(document.querySelector('.tab[data-tab="'+t+'"]')?t:'vendas')})();
+function trocarPin(){var a=prompt('PIN atual:');if(!a)return;var n1=prompt('Novo PIN (6 dígitos):');if(!n1)return;if(!/^\d{6}$/.test(n1)){alert('O novo PIN precisa ter 6 dígitos.');return}var n2=prompt('Confirme o novo PIN:');if(n1!==n2){alert('Os PINs não conferem.');return}fetch('/me/trocar_pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin_atual:a,pin_novo:n1})}).then(function(r){return r.json()}).then(function(j){if(j.ok){alert('PIN alterado com sucesso!')}else{alert(j.erro==='pin_atual_incorreto'?'PIN atual incorreto.':(j.erro||'Erro'))}}).catch(function(){alert('Erro de rede')})}
 var drawer=document.getElementById('charts-drawer'),btnC=document.getElementById('btn-charts');
 function applyCharts(){var open=sessionStorage.getItem('legacy_charts')==='1';drawer.classList.toggle('open',open);btnC.classList.toggle('on',open);}
 btnC.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts',sessionStorage.getItem('legacy_charts')==='1'?'0':'1');applyCharts();});
@@ -814,22 +870,31 @@ app.get('/', (req,res)=>{
 
   const feed = a.map(card).join('') || '<div class=empty>Nenhum evento ainda. Faça um POST em /hook/teste.</div>';
   const isAdmin = req.user && req.user.role === 'admin';
-  let adminBadge = '', adminHtml = '';
+  let adminBadge = '', adminHtml = '', auditHtml = '';
+  const tabs = '<a href="#" class="tab on" data-tab=vendas onclick="setTab(&#39;vendas&#39;);return false">Vendas</a>'
+    + (isAdmin ? '<a href="#" class=tab data-tab=admin onclick="setTab(&#39;admin&#39;);return false">Admin</a><a href="#" class=tab data-tab=auditoria onclick="setTab(&#39;auditoria&#39;);return false">Auditoria</a>' : '');
   if (isAdmin){
     const pend = db.prepare("SELECT nome, criado_em FROM users WHERE status='pendente' ORDER BY id ASC").all();
     if (pend.length){
-      adminBadge = ' <a href="#admin" class="badge b-orange" style="text-decoration:none;margin-left:8px">⏳ ' + pend.length + ' aprovaç' + (pend.length===1?'ão':'ões') + ' pendente' + (pend.length===1?'':'s') + '</a>';
+      adminBadge = ' <a href="#" class="badge b-orange" style="text-decoration:none;margin-left:8px" onclick="setTab(&#39;admin&#39;);return false">⏳ ' + pend.length + ' aprovaç' + (pend.length===1?'ão':'ões') + ' pendente' + (pend.length===1?'':'s') + '</a>';
       let rows = '';
       for (const p of pend){
         rows += '<tr><td>' + esc(p.nome) + '</td><td>' + fmtCardDT(p.criado_em) + '</td>'
           + '<td style="text-align:right"><button class="btn" style="margin:0 8px 0 0;background:#39d98a" onclick="doAdmin(&#39;aprovar&#39;,&#39;' + esc(p.nome) + '&#39;)">Aprovar</button>'
           + '<button class="btn" style="margin:0;background:#b04a4a;color:#fff" onclick="doAdmin(&#39;rejeitar&#39;,&#39;' + esc(p.nome) + '&#39;)">Rejeitar</button></td></tr>';
       }
-      adminHtml = '<div id=admin class=card style="margin:24px 0 16px"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Cadastros pendentes (' + pend.length + ')</h3>'
-        + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table></div>';
+      adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (' + pend.length + ')</h3>'
+        + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table>';
     }
+    if (!adminHtml) adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (0)</h3><div style="color:var(--mut);font-size:13px">Nenhum cadastro pendente. 🎉</div></div>';
+    else adminHtml += '<p style="margin:8px 0 0;font-size:12px;color:var(--mut)">Nenhum outro cadastro pendente.</p>';
+    adminHtml += '</div>';
   }
-  if (isAdmin) adminHtml += usersCardHtml(req);
+  if (isAdmin){
+    adminHtml += usersCardHtml(req);
+    const auditRows = db.prepare('SELECT * FROM auditoria ORDER BY id DESC LIMIT 100').all();
+    auditHtml = '<div class=card style="margin:16px 0"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><h3 style="margin:0;font-size:16px;color:var(--gold2)">📜 Auditoria</h3><a class=btn-csv href="/auditoria">Abrir página completa (filtros + CSV)</a></div>' + auditResumoHtml() + auditTableHtml(auditRows) + '</div>';
+  }
   const cls = f => (filtro===f?'on':'');
   let out = PAGE
     .replace('__USER__', esc(req.user ? req.user.nome : ''))
@@ -843,8 +908,10 @@ app.get('/', (req,res)=>{
     .replace('__EVENC__', encodeURIComponent(filtro))
     .replace('__CHARTMINI__', stats.pagasDia + (stats.pagasDia===1 ? ' venda hoje' : ' vendas hoje'))
     .replace('__CHART__', salesChart() + recoveryTable())
+    .replace('__TABS__', tabs)
     .replace('__ADMINBADGE__', adminBadge)
     .replace('__ADMIN__', adminHtml)
+    .replace('__AUDIT__', auditHtml)
     .replace('__FEED__', feed);
   res.setHeader('Content-Type','text/html; charset=utf-8');
   res.send(out);
