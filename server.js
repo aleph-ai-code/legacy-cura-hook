@@ -31,6 +31,8 @@ const SCHEMA = [
 '  nome TEXT UNIQUE NOT NULL,',
 '  pin_hash TEXT NOT NULL,',
 "  salt TEXT NOT NULL DEFAULT '',",
+"  status TEXT NOT NULL DEFAULT 'ativo',",
+"  role TEXT NOT NULL DEFAULT 'membro',",
 '  criado_em TEXT NOT NULL',
 ');',
 'CREATE TABLE IF NOT EXISTS acoes (',
@@ -45,6 +47,8 @@ const SCHEMA = [
 ].join('\n');
 db.exec(SCHEMA);
 try { db.exec("ALTER TABLE users ADD COLUMN salt TEXT NOT NULL DEFAULT ''"); } catch(e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'"); } catch(e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'membro'"); } catch(e) {}
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
 
 // Dedup: chave = webhook_evento + ':' + (venda.id ?? venda.uid ?? hash do body)
@@ -106,8 +110,8 @@ function parseToken(tok){
     if (!safeEq(sig, sign(payload))) return null;
     const d = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (!d.exp || d.exp < Date.now()) return null;
-    const u = db.prepare('SELECT id, nome FROM users WHERE id=?').get(d.id);
-    return (u && u.nome === d.nome) ? u : null;
+  const u = db.prepare('SELECT id, nome, status, role FROM users WHERE id=?').get(d.id);
+  return (u && u.nome === d.nome && u.status === 'ativo') ? u : null;
   } catch(e){ return null; }
 }
 function getAuth(req){
@@ -149,13 +153,12 @@ function loginPage(err, mode){
     '<form method=post action=/login>' +
     '<input type=text name=nome placeholder="Nome" autofocus required maxlength=40>' +
     '<input type=password name=pin placeholder="PIN (4 dígitos)" required inputmode=numeric maxlength=4 style="margin-top:12px">' +
-    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : ''))) + '</div></form>' +
+    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Nome já existe ou PIN inválido (4 dígitos).' : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : '')))))) + '</div></form>' +
     '<div class=alt><h2>SOU NOVO AQUI</h2>' +
     '<form method=post action=/login/novo>' +
     '<input type=text name=nome placeholder="Seu nome" required maxlength=40>' +
-    '<input type=password name=pin_admin placeholder="PIN admin" required maxlength=40 style="margin-top:12px">' +
-    '<input type=password name=pin placeholder="Seu PIN (4 dígitos)" required inputmode=numeric maxlength=4 style="margin-top:12px">' +
-    '<button>Criar acesso</button><div class=hint>Precisa do PIN de administrador para criar novo acesso.</div></form></div>');
+    '<input type=password name=pin placeholder="PIN (4 dígitos)" required inputmode=numeric maxlength=4 style="margin-top:12px">' +
+    '<button>Criar acesso</button><div class=hint>Seu cadastro ficará aguardando aprovação do admin.</div></form></div>');
 }
 // Middleware: tudo exige cookie, EXCETO webhook (EVO não autentica) e login/logout
 app.use((req,res,next)=>{
@@ -164,7 +167,7 @@ app.use((req,res,next)=>{
   if (req.path==='/favicon.ico') return res.status(404).end();
   const user = getAuth(req);
   if (user){ req.user = user; return next(); }
-  const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar' };
+  const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar', 'pendente':'pendente', 'existe':'existe', 'ok':'ok' };
   res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
   return res.send(loginPage(errMap[req.query && req.query.erro] || '', req.query && req.query.modo === 'criar' ? 'criar' : undefined));
 });
@@ -177,7 +180,8 @@ function formFields(req){
 app.post('/login', (req,res)=>{
   const f = formFields(req);
   const u = db.prepare('SELECT * FROM users WHERE nome = ?').get(String(f.nome||'').trim());
-  if (u && checkPin(f.pin, u.pin_hash)){ setAuthCookie(res, u); return res.redirect(302, '/'); }
+  if (u && u.status === 'pendente') return res.redirect(302, '/?erro=pendente');
+  if (u && u.status === 'ativo' && checkPin(f.pin, u.pin_hash)){ setAuthCookie(res, u); return res.redirect(302, '/'); }
   return res.redirect(302, '/?erro=1');
 });
 app.post('/login/criar', (req,res)=>{
@@ -185,7 +189,7 @@ app.post('/login/criar', (req,res)=>{
   const nome = String(f.nome||'').trim();
   if (usersCount() > 0 || !nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=1&modo=criar');
   try {
-    const stored = makePinHash(f.pin); const info = db.prepare('INSERT INTO users (nome, pin_hash, salt, criado_em) VALUES (?,?,?,?)').run(nome, stored, stored.split(':')[0], new Date().toISOString());
+    const stored = makePinHash(f.pin); const info = db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
     setAuthCookie(res, { id: info.lastInsertRowid, nome });
     return res.redirect(302, '/');
   } catch(e){ return res.redirect(302, '/?erro=1&modo=criar'); }
@@ -193,13 +197,34 @@ app.post('/login/criar', (req,res)=>{
 app.post('/login/novo', (req,res)=>{
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
-  if (!safeEq(f.pin_admin, PAINEL_PASSWORD)) return res.redirect(302, '/?erro=admin');
-  if (!nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=novo');
+  if (!nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=existe');
   try {
-    const stored = makePinHash(f.pin); const info = db.prepare('INSERT INTO users (nome, pin_hash, salt, criado_em) VALUES (?,?,?,?)').run(nome, stored, stored.split(':')[0], new Date().toISOString());
-    setAuthCookie(res, { id: info.lastInsertRowid, nome });
-    return res.redirect(302, '/');
-  } catch(e){ return res.redirect(302, '/?erro=novo'); }
+    const stored = makePinHash(f.pin);
+    db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
+    return res.redirect(302, '/?erro=ok');
+  } catch(e){ return res.redirect(302, '/?erro=existe'); }
+});
+
+// ===================== ADMIN: aprovacao de cadastros =====================
+function requireAdmin(req,res){ if (!req.user || req.user.role !== 'admin'){ res.status(403).json({ok:false, erro:'restrito_admin'}); return false; } return true; }
+const pendentesCount = () => db.prepare("SELECT COUNT(*) c FROM users WHERE status='pendente'").get().c;
+app.post('/admin/aprovar', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const nome = String((req.body||{}).nome||'').trim();
+  const u = db.prepare("SELECT * FROM users WHERE nome=? AND status='pendente'").get(nome);
+  if (!u) return res.status(404).json({ok:false, erro:'cadastro_nao_encontrado'});
+  db.prepare("UPDATE users SET status='ativo' WHERE id=?").run(u.id);
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)').run('cadastro', req.user.nome, 'aprovar_cadastro', nome, new Date().toISOString());
+  res.json({ok:true});
+});
+app.post('/admin/rejeitar', (req,res)=>{
+  if (!requireAdmin(req,res)) return;
+  const nome = String((req.body||{}).nome||'').trim();
+  const u = db.prepare("SELECT * FROM users WHERE nome=? AND status='pendente'").get(nome);
+  if (!u) return res.status(404).json({ok:false, erro:'cadastro_nao_encontrado'});
+  db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)').run('cadastro', req.user.nome, 'rejeitar_cadastro', nome, new Date().toISOString());
+  res.json({ok:true});
 });
 app.post('/logout', (req,res)=>{
   res.setHeader('Set-Cookie', AUTH_COOKIE + '=; Max-Age=0; HttpOnly; Path=/');
@@ -510,7 +535,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 .ev{padding:12px 16px;margin-bottom:8px}
 }
 </style></head><body>
-<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span class=who>· __USER__</span><form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div></div></div></header>
+<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span class=who>· __USER__</span>__ADMINBADGE__<form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div></div></div></header>
 <div class=wrap>
 <div class=kpis>
 <div class="card kpi"><div class=lbl>Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
@@ -526,6 +551,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <input id=q placeholder="Buscar por nome, whatsapp ou produto…" oninput="fltr()">
 <a class=btn-csv href="/export.csv?evento=__EVENC__">Exportar CSV</a>
 </div>
+__ADMIN__
 <div id=feed>__FEED__</div>
 <div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART__</div>
 </div>
@@ -538,6 +564,7 @@ function fltr(){const q=qi.value.toLowerCase();sessionStorage.setItem('legacy_q'
 fltr();
 function postAcao(url,data){fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json()).then(j=>{if(j.ok){location.reload()}else{alert(j.erro||'Erro')}}).catch(e=>alert('Erro de rede'))}
 function doAcao(ev,acao,detalhe){postAcao('/api/acao',{event_id:ev,acao:acao,detalhe:detalhe})}
+function doAdmin(act,nome){postAcao('/admin/'+act,{nome:nome})}
 function undoAcao(ev,acao){postAcao('/api/acao/toggle',{event_id:ev,acao:acao})}
 (function(){
 var drawer=document.getElementById('charts-drawer'),btnC=document.getElementById('btn-charts');
@@ -651,6 +678,22 @@ app.get('/', (req,res)=>{
   };
 
   const feed = a.map(card).join('') || '<div class=empty>Nenhum evento ainda. Faça um POST em /hook/teste.</div>';
+  const isAdmin = req.user && req.user.role === 'admin';
+  let adminBadge = '', adminHtml = '';
+  if (isAdmin){
+    const pend = db.prepare("SELECT nome, criado_em FROM users WHERE status='pendente' ORDER BY id ASC").all();
+    if (pend.length){
+      adminBadge = ' <a href="#admin" class="badge b-orange" style="text-decoration:none;margin-left:8px">⏳ ' + pend.length + ' aprovaç' + (pend.length===1?'ão':'ões') + ' pendente' + (pend.length===1?'':'s') + '</a>';
+      let rows = '';
+      for (const p of pend){
+        rows += '<tr><td>' + esc(p.nome) + '</td><td>' + fmtCardDT(p.criado_em) + '</td>'
+          + '<td style="text-align:right"><button class="btn" style="margin:0 8px 0 0;background:#39d98a" onclick="doAdmin(&#39;aprovar&#39;,&#39;' + esc(p.nome) + '&#39;)">Aprovar</button>'
+          + '<button class="btn" style="margin:0;background:#b04a4a;color:#fff" onclick="doAdmin(&#39;rejeitar&#39;,&#39;' + esc(p.nome) + '&#39;)">Rejeitar</button></td></tr>';
+      }
+      adminHtml = '<div id=admin class=card style="margin:24px 0 16px"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Cadastros pendentes (' + pend.length + ')</h3>'
+        + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table></div>';
+    }
+  }
   const cls = f => (filtro===f?'on':'');
   let out = PAGE
     .replace('__USER__', esc(req.user ? req.user.nome : ''))
@@ -664,6 +707,8 @@ app.get('/', (req,res)=>{
     .replace('__EVENC__', encodeURIComponent(filtro))
     .replace('__CHARTMINI__', stats.pagasDia + (stats.pagasDia===1 ? ' venda hoje' : ' vendas hoje'))
     .replace('__CHART__', salesChart() + recoveryTable())
+    .replace('__ADMINBADGE__', adminBadge)
+    .replace('__ADMIN__', adminHtml)
     .replace('__FEED__', feed);
   res.setHeader('Content-Type','text/html; charset=utf-8');
   res.send(out);
