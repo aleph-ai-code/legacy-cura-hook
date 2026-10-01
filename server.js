@@ -30,6 +30,7 @@ const SCHEMA = [
 '  id INTEGER PRIMARY KEY AUTOINCREMENT,',
 '  nome TEXT UNIQUE NOT NULL,',
 '  pin_hash TEXT NOT NULL,',
+"  salt TEXT NOT NULL DEFAULT '',",
 '  criado_em TEXT NOT NULL',
 ');',
 'CREATE TABLE IF NOT EXISTS acoes (',
@@ -43,6 +44,7 @@ const SCHEMA = [
 'CREATE INDEX IF NOT EXISTS idx_acoes_event ON acoes(event_id, acao);'
 ].join('\n');
 db.exec(SCHEMA);
+try { db.exec("ALTER TABLE users ADD COLUMN salt TEXT NOT NULL DEFAULT ''"); } catch(e) {}
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
 
 // Dedup: chave = webhook_evento + ':' + (venda.id ?? venda.uid ?? hash do body)
@@ -183,7 +185,7 @@ app.post('/login/criar', (req,res)=>{
   const nome = String(f.nome||'').trim();
   if (usersCount() > 0 || !nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=1&modo=criar');
   try {
-    const info = db.prepare('INSERT INTO users (nome, pin_hash, criado_em) VALUES (?,?,?)').run(nome, makePinHash(f.pin), new Date().toISOString());
+    const stored = makePinHash(f.pin); const info = db.prepare('INSERT INTO users (nome, pin_hash, salt, criado_em) VALUES (?,?,?,?)').run(nome, stored, stored.split(':')[0], new Date().toISOString());
     setAuthCookie(res, { id: info.lastInsertRowid, nome });
     return res.redirect(302, '/');
   } catch(e){ return res.redirect(302, '/?erro=1&modo=criar'); }
@@ -194,7 +196,7 @@ app.post('/login/novo', (req,res)=>{
   if (!safeEq(f.pin_admin, PAINEL_PASSWORD)) return res.redirect(302, '/?erro=admin');
   if (!nome || !/^\d{4}$/.test(f.pin)) return res.redirect(302, '/?erro=novo');
   try {
-    const info = db.prepare('INSERT INTO users (nome, pin_hash, criado_em) VALUES (?,?,?)').run(nome, makePinHash(f.pin), new Date().toISOString());
+    const stored = makePinHash(f.pin); const info = db.prepare('INSERT INTO users (nome, pin_hash, salt, criado_em) VALUES (?,?,?,?)').run(nome, stored, stored.split(':')[0], new Date().toISOString());
     setAuthCookie(res, { id: info.lastInsertRowid, nome });
     return res.redirect(302, '/');
   } catch(e){ return res.redirect(302, '/?erro=novo'); }
