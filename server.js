@@ -75,14 +75,14 @@ function isValidAuth(req){
 }
 function loginPage(err){
   return '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Acesso restrito</title><meta name=viewport content="width=device-width,initial-scale=1"><style>' +
-  'body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#17251d,#1b2c22,#17251d);color:#f7f3e9}' +
-  '.card{background:#213629;border:1px solid rgba(212,165,63,.45);border-radius:14px;padding:38px 42px;box-shadow:0 10px 30px rgba(0,0,0,.5);text-align:center;min-width:300px}' +
-  'h1{font-size:24px;font-weight:800;letter-spacing:6px;margin:0 0 4px;background:linear-gradient(90deg,#d4a53f,#eecf7e,#cd8900);-webkit-background-clip:text;background-clip:text;color:transparent}' +
-  'p{color:#c2bfa8;font-size:13px;margin:0 0 22px;letter-spacing:1px}' +
-  'input{width:100%;padding:11px 14px;border-radius:10px;border:1px solid rgba(212,175,55,.4);background:#17251d;color:#f7f3e9;font-size:14px;outline:none;box-sizing:border-box;text-align:center}' +
-  'input:focus{border-color:#d4a53f;box-shadow:0 0 0 2px rgba(212,175,55,.25)}' +
-  'button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:10px;background:linear-gradient(90deg,#d4a53f,#cd8900);color:#1a1033;font-weight:700;font-size:14px;cursor:pointer}' +
-  'button:hover{filter:brightness(1.1)}' +
+  'body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#17251d;color:#f7f3e9;line-height:1.5}' +
+  '.card{background:#213629;border:1px solid rgba(212,165,63,.45);border-radius:14px;padding:32px;box-shadow:0 4px 16px rgba(0,0,0,.4);text-align:center;min-width:300px}' +
+  'h1{font-size:28px;font-weight:800;letter-spacing:5px;margin:0 0 4px;color:#eecf7e}' +
+  'p{color:#a8b0a0;font-size:12px;margin:0 0 24px;letter-spacing:1px}' +
+  'input{width:100%;padding:8px 12px;border-radius:8px;border:1px solid rgba(212,165,63,.4);background:#17251d;color:#f7f3e9;font-size:14px;outline:none;box-sizing:border-box;text-align:center;line-height:1.4}' +
+  'input:focus{border-color:#d4a53f}' +
+  'button{margin-top:16px;width:100%;padding:8px;border:0;border-radius:8px;background:#d4a53f;color:#1a1033;font-weight:600;font-size:14px;cursor:pointer;line-height:1.4}' +
+  'button:hover{filter:brightness(1.08)}' +
   '.err{color:#e08a8a;font-size:12px;margin-top:12px;min-height:14px}' +
   '</style></head><body><div class=card><h1>LEGACY</h1><p>Acesso restrito</p>' +
   '<form method=post action=/login><input type=password name=senha placeholder="Senha" autofocus required><button>Entrar</button>' +
@@ -171,6 +171,9 @@ app.get('/backup', (req,res)=>{
 });
 
 // ===================== GRAFICO SVG (vendas pagas) =====================
+function chartCard(title, inner){
+  return '<div class="card chart-card"><h3>' + title + '</h3>' + inner + '</div>';
+}
 function salesChart(){
   const rows = db.prepare("SELECT ts FROM events WHERE evento='venda.paga'").all();
   const byDay = {}, byHour = {};
@@ -183,26 +186,26 @@ function salesChart(){
     if (day in byDay) byDay[day]++;
     if (t.toDateString()===now.toDateString()) byHour[t.getHours()]++;
   }
-  const W=860,PAD=24,BW=860/14-6;
-  const H=180,maxD=Math.max(1,...Object.values(byDay));
+  const W=1010,PAD=8,BW=(W-2*PAD)/14-8;
+  const H=170,maxD=Math.max(1,...Object.values(byDay));
   let svgD = '';
   Object.entries(byDay).forEach(([day,cnt],i)=>{
-    const h=(H-54)*cnt/maxD, x=PAD+i*(BW+6), y=H-30-h;
+    const h=(H-40)*cnt/maxD, x=PAD+i*(BW+8), y=H-28-h;
     svgD += '<rect x="'+x+'" y="'+y+'" width="'+BW+'" height="'+Math.max(h,cnt?2:0)+'" rx="3" fill="#d4a53f"><title>'+day+': '+cnt+'</title></rect>';
-    if (cnt) svgD += '<text x="'+(x+BW/2)+'" y="'+(y-4)+'" font-size="10" fill="#c2bfa8" text-anchor="middle">'+cnt+'</text>';
-    if (i%2===0) svgD += '<text x="'+(x+BW/2)+'" y="'+(H-16)+'" font-size="9" fill="#c2bfa8" text-anchor="middle">'+day.slice(5)+'</text>';
+    if (cnt) svgD += '<text x="'+(x+BW/2)+'" y="'+(y-4)+'" font-size="10" fill="#a8b0a0" text-anchor="middle">'+cnt+'</text>';
+    svgD += '<text x="'+(x+BW/2)+'" y="'+(H-12)+'" font-size="10" fill="#8f9c8f" text-anchor="middle">'+day.slice(5)+'</text>';
   });
-  const svgDay = '<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vendas por dia"><text x="'+PAD+'" y="12" font-size="12" fill="#eecf7e">Vendas por dia (14d)</text>'+svgD+'</svg>';
-  const HH=170,bw=(W-2*24)/24-3,maxH=Math.max(1,...Object.values(byHour));
+  const svgDay = '<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Vendas por dia">'+svgD+'</svg>';
+  const HH=150,bw=(W-2*PAD)/24-3,maxH=Math.max(1,...Object.values(byHour));
   let svgH = '';
   Object.entries(byHour).forEach(([hr,cnt],i)=>{
-    const h=(HH-60)*cnt/maxH, x=24+i*(bw+3), y=HH-30-h;
+    const h=(HH-40)*cnt/maxH, x=PAD+i*(bw+3), y=HH-28-h;
     svgH += '<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+Math.max(h,cnt?2:0)+'" rx="2" fill="#d4a53f"><title>'+hr+'h: '+cnt+'</title></rect>';
-    if (cnt) svgH += '<text x="'+(x+bw/2)+'" y="'+(y-4)+'" font-size="10" fill="#c2bfa8" text-anchor="middle">'+cnt+'</text>';
-    if (hr%3===0) svgH += '<text x="'+(x+bw/2)+'" y="'+(HH-16)+'" font-size="9" fill="#c2bfa8" text-anchor="middle">'+hr+'h</text>';
+    if (cnt) svgH += '<text x="'+(x+bw/2)+'" y="'+(y-4)+'" font-size="10" fill="#a8b0a0" text-anchor="middle">'+cnt+'</text>';
+    if (hr%3===0) svgH += '<text x="'+(x+bw/2)+'" y="'+(HH-10)+'" font-size="10" fill="#8f9c8f" text-anchor="middle">'+hr+'h</text>';
   });
-  const svgHour = '<svg width="'+W+'" height="'+HH+'" viewBox="0 0 '+W+' '+HH+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vendas por hora (hoje)"><text x="24" y="12" font-size="12" fill="#eecf7e">Vendas por hora (hoje)</text>'+svgH+'</svg>';
-  return '<div class=chart>'+svgDay+svgHour+'</div>';
+  const svgHour = '<svg width="'+W+'" height="'+HH+'" viewBox="0 0 '+W+' '+HH+'" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Vendas por hora (hoje)">'+svgH+'</svg>';
+  return chartCard('Vendas por dia (14 dias)', svgDay) + chartCard('Vendas por hora (hoje)', svgHour);
 }
 
 function startOfToday(){ const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
@@ -211,71 +214,82 @@ function fmtBRL(centavos, moeda){
   try { return (centavos/100).toLocaleString('pt-BR',{style:'currency',currency:cur}); } catch(e){ return 'R$ ' + (centavos/100).toFixed(2); }
 }
 
-// ===================== PAINEL LEGACY (UX review: layout limpo) =====================
+// ===================== PAINEL LEGACY (design pass: grid, ritmo, hierarquia) =====================
 const PAGE = `<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Painel de Vendas</title><meta name=viewport content="width=device-width,initial-scale=1"><style>
-:root{--gold:#d4a53f;--gold2:#eecf7e;--amber:#cd8900;--bg:#17251d;--card:#213629;--txt:#f7f3e9;--mut:#c2bfa8}
-*{box-sizing:border-box}body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;background:linear-gradient(180deg,#17251d 0%,#1b2c22 60%,#17251d 100%);color:var(--txt);min-height:100vh}
-/* Header único */
-header{background:linear-gradient(135deg,var(--bg) 0%,#243c2e 55%,#1d3024 100%);border-bottom:1px solid rgba(212,165,63,.45);padding:18px 24px}
-.htop{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-h1{margin:0;font-size:26px;font-weight:800;letter-spacing:6px;background:linear-gradient(90deg,var(--gold),var(--gold2),var(--amber));-webkit-background-clip:text;background-clip:text;color:transparent}
-.sub{font-size:14px;color:var(--mut);letter-spacing:1px}
-.live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--gold2)}
-.dot{width:9px;height:9px;border-radius:50%;background:#39d98a;animation:pulse 1.6s infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(57,217,138,.55)}70%{box-shadow:0 0 0 9px rgba(57,217,138,0)}100%{box-shadow:0 0 0 0 rgba(57,217,138,0)}}
-.clock{font-variant-numeric:tabular-nums;font-weight:600;color:var(--gold)}
-/* KPIs: uma linha só */
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:-22px 24px 0;position:relative;z-index:2}
-.kpi{background:linear-gradient(160deg,var(--card),#2a4233);border:1px solid rgba(212,175,55,.35);border-radius:14px;padding:16px 18px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
-.kpi .lbl{font-size:13px;color:var(--mut)}
-.kpi .val{font-size:26px;font-weight:800;margin-top:6px;background:linear-gradient(90deg,var(--gold),var(--gold2));-webkit-background-clip:text;background-clip:text;color:transparent}
-.kpi .sub{font-size:12px;color:var(--mut);margin-top:4px}
-main{padding:20px 24px 40px}
-/* Barra de controles única */
-.bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
-#q{flex:1;min-width:220px;background:var(--card);border:1px solid rgba(212,175,55,.4);color:var(--txt);border-radius:10px;padding:10px 14px;font-size:14px;outline:none}
-#q:focus{border-color:var(--gold);box-shadow:0 0 0 2px rgba(212,175,55,.25)}
+:root{--gold:#d4a53f;--gold2:#eecf7e;--bg:#17251d;--card:#213629;--line:rgba(212,165,63,.25);--txt:#f7f3e9;--mut:#a8b0a0}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5}
+.wrap{max-width:1100px;margin:0 auto;padding:0 24px}
+header{border-bottom:1px solid var(--line);padding:24px 0 16px}
+.htop{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)}
+.sub{font-size:14px;color:var(--mut)}
+.live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut)}
+.dot{width:8px;height:8px;border-radius:50%;background:#39d98a}
+.clock{font-variant-numeric:tabular-nums;color:var(--mut)}
+.sair{color:var(--mut);font-size:12px;text-decoration:none;margin-left:8px}
+.sair:hover{color:var(--gold2)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;padding:24px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+.kpi .lbl{font-size:12px;color:var(--mut)}
+.kpi .val{font-size:28px;font-weight:700;margin-top:4px;color:var(--txt);line-height:1.2}
+.kpi .sub{font-size:12px;color:var(--mut);margin-top:2px}
+.bar{display:flex;gap:16px;align-items:center;padding:24px 0 16px}
 .filters{display:flex;gap:8px}
-.filters a{padding:7px 14px;border-radius:999px;border:1px solid rgba(212,175,55,.4);color:var(--gold2);text-decoration:none;font-size:13px;transition:.2s}
-.filters a:hover{background:rgba(212,175,55,.12)}
-.filters a.on{background:linear-gradient(90deg,var(--gold),var(--amber));color:#1a1033;font-weight:700;border-color:var(--gold)}
-.btn-csv{padding:8px 16px;border-radius:10px;background:linear-gradient(90deg,var(--gold),var(--amber));color:#1a1033;font-weight:700;text-decoration:none;font-size:13px;box-shadow:0 3px 10px rgba(212,175,55,.35)}
-.btn-csv:hover{filter:brightness(1.1)}
-.chart{margin-bottom:16px}.chart svg{max-width:100%;height:auto;background:linear-gradient(165deg,var(--card),#274032);border:1px solid rgba(212,175,55,.28);border-radius:12px;display:block;margin-bottom:8px}
-.btn-csv:hover{background:rgba(212,175,55,.22)}
-/* Cards */
-.ev{background:linear-gradient(165deg,var(--card),#274032);border:1px solid rgba(212,175,55,.28);border-left:3px solid var(--gold);border-radius:12px;margin-bottom:12px;padding:14px 16px;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+.filters a{padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;line-height:1.4}
+.filters a:hover{background:rgba(212,165,63,.1)}
+.filters a.on{background:var(--gold);color:#1a1033;font-weight:600;border-color:var(--gold)}
+#q{flex:1;min-width:200px;background:var(--card);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 12px;font-size:14px;line-height:1.4;outline:none}
+#q:focus{border-color:var(--gold)}
+.btn-csv{padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.btn-csv:hover{background:rgba(212,165,63,.1)}
+.charts{display:grid;gap:16px;padding-bottom:8px}
+.chart-card h3{margin:0 0 12px;font-size:16px;font-weight:600;color:var(--txt)}
+.chart-card svg{width:100%;height:auto;display:block}
+#feed{padding:16px 0 40px}
+.ev{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.35)}
 .ev .meta{color:var(--mut);font-size:12px;margin-bottom:8px}
 .ev .fields{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.f{background:rgba(212,175,55,.08);border:1px solid rgba(212,175,55,.2);padding:4px 10px;border-radius:8px;font-size:13px}
+.f{font-size:14px}
+.f .who{font-weight:600}
+.f .prod{color:var(--mut);font-size:13px}
 .f a{color:var(--gold2);text-decoration:none}
-.badge{padding:4px 10px;border-radius:8px;font-size:12px;font-weight:700}
-.b-gold{background:linear-gradient(90deg,var(--gold),var(--amber));color:#1a1033}
-.b-orange{background:#5a3b12;color:#ffc46b;border:1px solid #8a5a1d}
-.b-gray{background:#2e4636;color:var(--mut)}
-.hl{margin-top:8px;font-size:15px;font-weight:600;color:var(--gold2)}
-.btn{display:inline-block;margin-top:8px;background:linear-gradient(90deg,var(--gold),var(--amber));color:#1a1033;font-weight:700;padding:8px 16px;border-radius:10px;text-decoration:none}
-.btn:hover{filter:brightness(1.1)}
-details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#cfd8c6;background:#122019;border-radius:8px;padding:10px}
-.empty{color:var(--mut);text-align:center;padding:40px 0;font-size:15px}
-@media(max-width:640px){header{padding:14px 16px}.kpis{grid-template-columns:repeat(2,1fr);margin:-18px 14px 0;gap:10px}main{padding:16px 14px 30px}h1{font-size:20px;letter-spacing:4px}.kpi .val{font-size:20px}}
+.badge{padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}
+.b-gold{background:rgba(212,165,63,.15);color:var(--gold2);border:1px solid var(--line)}
+.b-orange{background:rgba(205,137,0,.15);color:#ffc46b;border:1px solid rgba(205,137,0,.35)}
+.b-gray{background:rgba(255,255,255,.05);color:var(--mut);border:1px solid rgba(255,255,255,.1)}
+.hl{margin-top:8px;font-size:16px;font-weight:600;color:var(--gold2)}
+.btn{display:inline-block;margin-top:8px;background:var(--gold);color:#1a1033;font-weight:600;padding:8px 16px;border-radius:8px;text-decoration:none;font-size:13px}
+.btn:hover{filter:brightness(1.08)}
+details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#cfd8c6;background:#122019;border-radius:8px;padding:12px}
+.empty{color:var(--mut);text-align:center;padding:40px 0;font-size:14px}
+@media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:640px){
+.wrap{padding:0 16px}
+.htop{gap:8px}h1{font-size:20px;letter-spacing:3px}
+.kpis{gap:8px;padding:16px 0 8px}
+.bar{flex-direction:column;align-items:stretch;gap:8px}
+#q{min-width:0}
+.charts{gap:8px}
+.ev{padding:12px 16px;margin-bottom:8px}
+}
 </style></head><body>
-<header><div class=htop><h1>LEGACY</h1><span class=sub>· Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><form action=/logout method=post style=display:none id=lo></form><a href="#" onclick="document.getElementById('lo').submit();return false" style="color:#c2bfa8;font-size:12px;margin-left:12px;text-decoration:none">sair</a></div></div></header>
+<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div></div></div></header>
+<div class=wrap>
 <div class=kpis>
-<div class=kpi><div class=lbl>💰 Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
-<div class=kpi><div class=lbl>✅ Vendas pagas hoje</div><div class=val>__PGD__</div><div class=sub>__PGT__ no total</div></div>
-<div class=kpi><div class=lbl>🛒 Carrinhos abandonados hoje</div><div class=val>__CRD__</div><div class=sub>__CRT__ no total</div></div>
-<div class=kpi><div class=lbl>📥 Eventos hoje</div><div class=val>__TTD__</div><div class=sub>__TOT__ no total</div></div>
+<div class="card kpi"><div class=lbl>Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
+<div class="card kpi"><div class=lbl>Vendas pagas hoje</div><div class=val>__PGD__</div><div class=sub>__PGT__ no total</div></div>
+<div class="card kpi"><div class=lbl>Carrinhos abandonados hoje</div><div class=val>__CRD__</div><div class=sub>__CRT__ no total</div></div>
+<div class="card kpi"><div class=lbl>Eventos hoje</div><div class=val>__TTD__</div><div class=sub>__TOT__ no total</div></div>
 </div>
-<main>
 <div class=bar>
-<div class=filters><a href="/?evento=todos" class="__C0__">Todos</a><a href="/?evento=venda.paga" class="__C1__">✅ Pagas</a><a href="/?evento=carrinho.abandonado" class="__C2__">🛒 Abandonados</a></div>
-<input id=q placeholder="🔎 Buscar por nome, whatsapp ou produto…" oninput="fltr()">
-<a class=btn-csv href="/export.csv?evento=__EVENC__">📥 Exportar CSV</a>
+<div class=filters><a href="/?evento=todos" class="__C0__">Todos</a><a href="/?evento=venda.paga" class="__C1__">Pagas</a><a href="/?evento=carrinho.abandonado" class="__C2__">Abandonados</a></div>
+<input id=q placeholder="Buscar por nome, whatsapp ou produto…" oninput="fltr()">
+<a class=btn-csv href="/export.csv?evento=__EVENC__">Exportar CSV</a>
 </div>
-<div id=chart-holder>__CHART__</div>
+<div class=charts id=chart-holder>__CHART__</div>
 <div id=feed>__FEED__</div>
-</main>
+</div>
 <script>
 setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR')},1000);document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR');
 const qi=document.getElementById('q');qi.value=sessionStorage.getItem('legacy_q')||'';
@@ -329,10 +343,10 @@ app.get('/', (req,res)=>{
     const searchable = JSON.stringify([cli.nome,cli.whatsapp,prod.nome]).toLowerCase();
     return '<div class=ev data-s="'+esc(searchable)+'"><div class=meta>#'+esc(e.id)+' · 🕒 '+hora+'</div>'
       + '<div class=fields>'+badge
-      + (cli.nome?' <span class=f>👤 '+esc(cli.nome)+'</span>':'')
+      + (cli.nome?' <span class="f who">👤 '+esc(cli.nome)+'</span>':'')
       + (cli.whatsapp?' <span class=f>'+waLink+'</span>':'')
-      + (prod.nome?' <span class=f>📦 '+esc(prod.nome)+'</span>':'')
-      + (venda.forma_pagamento?' <span class=f>💳 '+esc(venda.forma_pagamento)+'</span>':'')
+      + (prod.nome?' <span class="f prod">📦 '+esc(prod.nome)+'</span>':'')
+      + (venda.forma_pagamento?' <span class="f prod">💳 '+esc(venda.forma_pagamento)+'</span>':'')
       + '</div>' + extra
       + '<details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
   };
