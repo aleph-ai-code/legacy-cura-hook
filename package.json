@@ -1,11 +1,12 @@
 {
   "name": "legacy-cura-hook",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "express": "^4.19.0"
   }
 }

@@ -1,13 +1,33 @@
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
+const Database = require('better-sqlite3');
 const app = express();
-const DATA = process.env.DATA_FILE || '/data/events.json';
-function load(){ try{ return JSON.parse(fs.readFileSync(DATA,'utf8')); }catch(e){ return []; } }
-function save(a){ fs.mkdirSync(require('path').dirname(DATA),{recursive:true}); fs.writeFileSync(DATA, JSON.stringify(a.slice(-5000))); }
-function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-app.use(express.json({limit:'2mb'}));
-app.use(express.text({type:'*/*', limit:'2mb'}));
+const DATA_DIR = process.env.DATA_DIR || '/data';
+const DB_FILE = path.join(DATA_DIR, 'events.db');
+const LEGACY_JSON = process.env.DATA_FILE || path.join(DATA_DIR, 'events.json');
+const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+// ===================== SQLITE =====================
+const db = new Database(DB_FILE);
+db.pragma('journal_mode = WAL');
+db.exec(`
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  origem TEXT NOT NULL,
+  evento TEXT,
+  venda_id TEXT,
+  ts TEXT NOT NULL,
+  json TEXT NOT NULL,
+  dedup_key TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_evento_ts ON events(evento, ts);
+CREATE INDEX IF NOT EXISTS idx_events_origem ON events(origem);
+`);
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
 
 // Dedup: chave = webhook_evento + ':' + (venda.id ?? venda.uid ?? hash do body)
 function dedupKey(body){
@@ -17,38 +37,124 @@ function dedupKey(body){
   return ev + ':' + id;
 }
 
+const insStmt = db.prepare('INSERT OR IGNORE INTO events (id, origem, evento, venda_id, ts, json, dedup_key) VALUES (?,?,?,?,?,?,?)');
+const allRows = () => db.prepare('SELECT * FROM events ORDER BY ts ASC').all();
+const rowToEvent = (r) => { let body={}; try{ body=JSON.parse(r.json); }catch(e){} return { id:r.id, origem:r.origem, ts:r.ts, body }; };
+
+// Migração do events.json legado
+(function migrate(){
+  try {
+    if (!fs.existsSync(LEGACY_JSON)) return;
+    const arr = JSON.parse(fs.readFileSync(LEGACY_JSON, 'utf8'));
+    const tx = db.transaction((items) => {
+      for (const e of items) {
+        const body = e.body || {};
+        const ev = body.webhook_evento || 'outro';
+        const vid = body.venda && (body.venda.id ?? body.venda.uid);
+        insStmt.run(String(e.id), String(e.origem||'desconhecida'), ev, vid==null?null:String(vid), String(e.ts||new Date().toISOString()), JSON.stringify(body), dedupKey(body));
+      }
+    });
+    tx(arr);
+    fs.renameSync(LEGACY_JSON, LEGACY_JSON + '.migrated');
+    console.log('Migrados', arr.length, 'eventos de events.json para SQLite');
+  } catch (e) { console.error('Migracao falhou:', e.message); }
+})();
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+app.use(express.json({limit:'2mb'}));
+app.use(express.text({type:'*/*', limit:'2mb'}));
+
 // Recebe QUALQUER POST em /hook/:origem — responde 200 sempre
 app.post('/hook/:origem', (req,res)=>{
   let body = req.body;
   if (typeof body === 'string'){ try{ body = JSON.parse(body); }catch(e){} }
-  const ev = { id: Date.now()+'-'+Math.random().toString(36).slice(2,7), origem: req.params.origem, ts: new Date().toISOString(), ip: req.ip, headers: req.headers, body: body };
-  const key = dedupKey(body);
-  const a = load();
-  if (a.some(e => e.dedupKey === key)){
-    ev.dedup = true; ev.dedupKey = key; a.push(ev); save(a);
-    return res.status(200).json({ok:true, dedupe:true});
-  }
-  ev.dedupKey = key; a.push(ev); save(a);
+  const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
+  const origem = req.params.origem;
+  const ts = new Date().toISOString();
+  const ev = body && body.webhook_evento || 'outro';
+  const vid = body && body.venda && (body.venda.id ?? body.venda.uid);
+  const info = insStmt.run(id, origem, ev, vid==null?null:String(vid), ts, JSON.stringify(body), dedupKey(body));
+  if (info.changes === 0) return res.status(200).json({ok:true, dedupe:true});
   res.status(200).json({ok:true});
 });
 
 // Export CSV
+function csvField(v){
+  let sv = v==null ? '' : String(v);
+  if (/[",\n\r]/.test(sv)) sv = '"' + sv.replace(/"/g,'""') + '"';
+  return sv;
+}
 app.get('/export.csv', (req,res)=>{
   const filtro = req.query.evento || 'todos';
-  const all = load().slice(-5000).filter(e=>!e.dedup);
-  let a = all;
+  let a = allRows().map(rowToEvent);
   if (filtro==='venda.paga' || filtro==='carrinho.abandonado') a = a.filter(e=>e.body && e.body.webhook_evento===filtro);
-  const rows = [['id','data','evento','origem','cliente','whatsapp','produto','valor','pagamento']];
+  const header = ['webhook_evento','venda.id','data','status','cliente.nome','cliente.cpf','cliente.email','cliente.whatsapp','produto.nome','valor','forma_pagamento','origem','link_recuperacao'];
+  const lines = [header.join(',')];
   for (const e of a){
     const b = e.body || {}, cli = b.cliente||{}, prod = b.produto||{}, v = b.venda||{}, c = b.carrinho||{};
-    rows.push([e.id, e.ts, b.webhook_evento||'', e.origem, cli.nome||'', cli.whatsapp||'', prod.nome||'',
-      c.total_venda || b.valor || '', v.forma_pagamento || '']);
+    const valor = Number(c.total_venda) || Number(b.valor) || '';
+    lines.push([
+      b.webhook_evento, v.id ?? v.uid ?? '', e.ts, v.status ?? b.status ?? '',
+      cli.nome, cli.cpf ?? cli.documento, cli.email, cli.whatsapp ?? cli.telefone,
+      prod.nome, valor, v.forma_pagamento ?? b.forma_pagamento, e.origem, c.link_recuperacao
+    ].map(csvField).join(','));
   }
-  const csv = rows.map(r=>r.map(x=>'"'+String(x==null?'':x).replace(/"/g,'""')+'"').join(';')).join('\n');
   res.setHeader('Content-Type','text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition','attachment; filename="legacy-eventos.csv"');
-  res.send(csv);
+  res.setHeader('Content-Disposition','attachment; filename="vendas-legacy.csv"');
+  res.send('\ufeff' + lines.join('\r\n'));
 });
+
+// ===================== BACKUP DIARIO =====================
+function doBackup(){
+  try {
+    const d = new Date().toISOString().slice(0,10);
+    const dest = path.join(BACKUP_DIR, 'events-' + d + '.db');
+    fs.copyFileSync(DB_FILE, dest);
+    const files = fs.readdirSync(BACKUP_DIR).filter(f=>f.startsWith('events-')&&f.endsWith('.db')).sort();
+    while (files.length > 30) fs.unlinkSync(path.join(BACKUP_DIR, files.shift()));
+    return path.basename(dest);
+  } catch(e){ console.error('backup erro:', e.message); return null; }
+}
+setInterval(doBackup, 24*60*60*1000);
+app.get('/backup', (req,res)=>{
+  const f = doBackup();
+  if (!f) return res.status(500).json({ok:false});
+  res.json({ok:true, file:f});
+});
+
+// ===================== GRAFICO SVG (vendas pagas) =====================
+function salesChart(){
+  const rows = db.prepare("SELECT ts FROM events WHERE evento='venda.paga'").all();
+  const byDay = {}, byHour = {};
+  const now = new Date();
+  for (let i=13;i>=0;i--){ const d=new Date(now); d.setDate(d.getDate()-i); byDay[d.toISOString().slice(0,10)]=0; }
+  for (let h=0;h<24;h++) byHour[h]=0;
+  for (const r of rows){
+    const t = new Date(r.ts);
+    const day = r.ts.slice(0,10);
+    if (day in byDay) byDay[day]++;
+    if (t.toDateString()===now.toDateString()) byHour[t.getHours()]++;
+  }
+  const W=860,PAD=24,BW=860/14-6;
+  const H=180,maxD=Math.max(1,...Object.values(byDay));
+  let svgD = '';
+  Object.entries(byDay).forEach(([day,cnt],i)=>{
+    const h=(H-54)*cnt/maxD, x=PAD+i*(BW+6), y=H-30-h;
+    svgD += '<rect x="'+x+'" y="'+y+'" width="'+BW+'" height="'+Math.max(h,cnt?2:0)+'" rx="3" fill="#d4a53f"><title>'+day+': '+cnt+'</title></rect>';
+    if (cnt) svgD += '<text x="'+(x+BW/2)+'" y="'+(y-4)+'" font-size="10" fill="#c2bfa8" text-anchor="middle">'+cnt+'</text>';
+    if (i%2===0) svgD += '<text x="'+(x+BW/2)+'" y="'+(H-16)+'" font-size="9" fill="#c2bfa8" text-anchor="middle">'+day.slice(5)+'</text>';
+  });
+  const svgDay = '<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vendas por dia"><text x="'+PAD+'" y="12" font-size="12" fill="#eecf7e">Vendas por dia (14d)</text>'+svgD+'</svg>';
+  const HH=170,bw=(W-2*24)/24-3,maxH=Math.max(1,...Object.values(byHour));
+  let svgH = '';
+  Object.entries(byHour).forEach(([hr,cnt],i)=>{
+    const h=(HH-60)*cnt/maxH, x=24+i*(bw+3), y=HH-30-h;
+    svgH += '<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+Math.max(h,cnt?2:0)+'" rx="2" fill="#d4a53f"><title>'+hr+'h: '+cnt+'</title></rect>';
+    if (cnt) svgH += '<text x="'+(x+bw/2)+'" y="'+(y-4)+'" font-size="10" fill="#c2bfa8" text-anchor="middle">'+cnt+'</text>';
+    if (hr%3===0) svgH += '<text x="'+(x+bw/2)+'" y="'+(HH-16)+'" font-size="9" fill="#c2bfa8" text-anchor="middle">'+hr+'h</text>';
+  });
+  const svgHour = '<svg width="'+W+'" height="'+HH+'" viewBox="0 0 '+W+' '+HH+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vendas por hora (hoje)"><text x="24" y="12" font-size="12" fill="#eecf7e">Vendas por hora (hoje)</text>'+svgH+'</svg>';
+  return '<div class=chart>'+svgDay+svgHour+'</div>';
+}
 
 function startOfToday(){ const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
 function fmtBRL(centavos, moeda){
@@ -84,7 +190,9 @@ main{padding:20px 24px 40px}
 .filters a{padding:7px 14px;border-radius:999px;border:1px solid rgba(212,175,55,.4);color:var(--gold2);text-decoration:none;font-size:13px;transition:.2s}
 .filters a:hover{background:rgba(212,175,55,.12)}
 .filters a.on{background:linear-gradient(90deg,var(--gold),var(--amber));color:#1a1033;font-weight:700;border-color:var(--gold)}
-.btn-csv{padding:7px 14px;border-radius:999px;background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.4);color:var(--gold2);text-decoration:none;font-size:13px}
+.btn-csv{padding:8px 16px;border-radius:10px;background:linear-gradient(90deg,var(--gold),var(--amber));color:#1a1033;font-weight:700;text-decoration:none;font-size:13px;box-shadow:0 3px 10px rgba(212,175,55,.35)}
+.btn-csv:hover{filter:brightness(1.1)}
+.chart{margin-bottom:16px}.chart svg{max-width:100%;height:auto;background:linear-gradient(165deg,var(--card),#274032);border:1px solid rgba(212,175,55,.28);border-radius:12px;display:block;margin-bottom:8px}
 .btn-csv:hover{background:rgba(212,175,55,.22)}
 /* Cards */
 .ev{background:linear-gradient(165deg,var(--card),#274032);border:1px solid rgba(212,175,55,.28);border-left:3px solid var(--gold);border-radius:12px;margin-bottom:12px;padding:14px 16px;box-shadow:0 4px 14px rgba(0,0,0,.4)}
@@ -114,8 +222,9 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <div class=bar>
 <div class=filters><a href="/?evento=todos" class="__C0__">Todos</a><a href="/?evento=venda.paga" class="__C1__">✅ Pagas</a><a href="/?evento=carrinho.abandonado" class="__C2__">🛒 Abandonados</a></div>
 <input id=q placeholder="🔎 Buscar por nome, whatsapp ou produto…" oninput="fltr()">
-<a class=btn-csv href="/export.csv?evento=__EVENC__">⬇ Exportar CSV</a>
+<a class=btn-csv href="/export.csv?evento=__EVENC__">📥 Exportar CSV</a>
 </div>
+<div id=chart-holder>__CHART__</div>
 <div id=feed>__FEED__</div>
 </main>
 <script>
@@ -128,7 +237,7 @@ setTimeout(()=>{location.href=location.pathname+(location.search||'')},15000);
 
 app.get('/', (req,res)=>{
   const filtro = req.query.evento || 'todos';
-  const all = load().slice(-5000);
+  const all = allRows().slice(-5000).map(rowToEvent);
   const t0 = startOfToday();
   const evo = all.filter(e=>!e.dedup && e.body && e.body.webhook_evento);
   const fatHoje = evo.filter(e=>e.body.webhook_evento==='venda.paga' && new Date(e.ts).getTime()>=t0)
@@ -188,8 +297,9 @@ app.get('/', (req,res)=>{
     .replace('__TOT__', stats.total).replace('__TTD__', stats.totalDia)
     .replace('__C0__', cls('todos')).replace('__C1__', cls('venda.paga')).replace('__C2__', cls('carrinho.abandonado'))
     .replace('__EVENC__', encodeURIComponent(filtro))
+    .replace('__CHART__', salesChart())
     .replace('__FEED__', feed);
   res.setHeader('Content-Type','text/html; charset=utf-8');
   res.send(out);
 });
-app.listen(3210, ()=>console.log('Hook collector Legacy on :3210'));
+app.listen(3210, ()=>console.log('Hook collector Legacy on :3210 (SQLite)'));
