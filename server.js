@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   nome TEXT UNIQUE NOT NULL,
   pin_hash TEXT NOT NULL,
-  salt TEXT NOT NULL,
   criado_em TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS acoes (
@@ -38,10 +37,10 @@ CREATE TABLE IF NOT EXISTS acoes (
   event_id TEXT NOT NULL,
   user_nome TEXT NOT NULL,
   acao TEXT NOT NULL,
-  detalhe TEXT,
+  texto TEXT,
   ts TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_acoes_event ON acoes(event_id);
+CREATE INDEX IF NOT EXISTS idx_acoes_event ON acoes(event_id, acao);
 `);
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
 
@@ -57,7 +56,7 @@ const insStmt = db.prepare('INSERT OR IGNORE INTO events (id, origem, evento, ve
 const allRows = () => db.prepare('SELECT * FROM events ORDER BY ts ASC').all();
 const rowToEvent = (r) => { let body={}; try{ body=JSON.parse(r.json); }catch(e){} return { id:r.id, origem:r.origem, ts:r.ts, body }; };
 
-// Migracao do events.json legado
+// Migração do events.json legado
 (function migrate(){
   try {
     if (!fs.existsSync(LEGACY_JSON)) return;
@@ -79,113 +78,179 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;
 app.use(express.json({limit:'2mb'}));
 app.use(express.text({type:'*/*', limit:'2mb'}));
 
-// ===================== USUARIOS (Nome + PIN) =====================
-const PAINEL_PASSWORD = process.env.PAINEL_PASSWORD || 'L3g@cy';
+// ===================== AUTENTICACAO: usuarios nomeados + PIN =====================
+const PAINEL_PASSWORD = process.env.PAINEL_PASSWORD || 'L3g@cy'; // PIN-admin para cadastros
 const AUTH_SECRET = process.env.PAINEL_SECRET || 'legacy-painel-secret-v1';
-const USER_COOKIE = 'legacy_user';
-const ACOES_VALIDAS = ['check_boasvindas','check_removido_vip','check_onboarding_ok','claim_carrinho','resultado_conquistou','resultado_nao','nota'];
-const userCount = () => db.prepare('SELECT COUNT(*) c FROM users').get().c;
-function hashPin(pin, salt){ return crypto.scryptSync(String(pin), String(salt), 32).toString('hex'); }
-function signUser(id, nome){ return id + '.' + crypto.createHmac('sha256', AUTH_SECRET).update(id + '|' + nome).digest('hex'); }
-function getUser(req){
-  try {
-    const m = new RegExp('(?:^|;\\s*)' + USER_COOKIE + '=([A-Za-z0-9]+\\.[a-f0-9]{64})').exec(req.headers.cookie || '');
-    if (!m) return null;
-    const dot = m[1].indexOf('.');
-    const id = m[1].slice(0, dot);
-    const u = db.prepare('SELECT * FROM users WHERE id=?').get(id);
-    if (!u) return null;
-    return signUser(u.id, u.nome) === m[1] ? u : null;
-  } catch(e){ return null; }
-}
-function setLoginCookie(res, u){
-  res.setHeader('Set-Cookie', USER_COOKIE + '=' + signUser(u.id, u.nome) + '; Max-Age=2592000; HttpOnly; Path=/');
-}
+const USER_COOKIE = 'painel_user';
 function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
+function pinHash(nome, pin){ return crypto.createHash('sha256').update(String(nome).toLowerCase().trim() + '|' + String(pin) + '|' + AUTH_SECRET).digest('hex'); }
+function userCount(){ return db.prepare('SELECT COUNT(*) c FROM users').get().c; }
+function userByNome(nome){ try { return db.prepare('SELECT * FROM users WHERE nome = ?').get(String(nome||'').trim()); } catch(e){ return null; } }
+function userById(id){ try { return db.prepare('SELECT * FROM users WHERE id = ?').get(Number(id)); } catch(e){ return null; } }
+function signPayload(p){ return crypto.createHmac('sha256', AUTH_SECRET).update(p).digest('hex'); }
+function setSession(res, u){
+  const payload = u.id + '.' + Buffer.from(u.nome, 'utf8').toString('base64url');
+  res.setHeader('Set-Cookie', USER_COOKIE + '=' + payload + '.' + signPayload(payload) + '; Max-Age=2592000; HttpOnly; Path=/');
+}
+function clearSession(res){ res.setHeader('Set-Cookie', USER_COOKIE + '=; Max-Age=0; HttpOnly; Path=/'); }
+function currentUser(req){
+  const m = new RegExp('(?:^|;\\s*)' + USER_COOKIE + '=([^.]+)\\.([^.;]+)\\.([a-f0-9]{64})').exec(req.headers.cookie || '');
+  if (!m) return null;
+  const payload = m[1] + '.' + m[2];
+  if (!safeEq(m[3], signPayload(payload))) return null;
+  const u = userById(Number(m[1]));
+  if (!u) return null;
+  let nome = ''; try { nome = Buffer.from(m[2], 'base64url').toString('utf8'); } catch(e){}
+  return nome === u.nome ? { id: u.id, nome: u.nome } : null;
+}
 
-// Middleware: /hook/* livre (EVO nao autentica); login/logout livres; resto exige usuario
+// ===================== ACAO (checklist / claim / resultado) =====================
+const ACAO_VALIDA = ['check_boasvindas','check_removido_vip','check_onboarding_ok','claim_carrinho','resultado_conquistou','resultado_nao','nota'];
+const acoesFor = (eventId) => db.prepare('SELECT * FROM acoes WHERE event_id = ? ORDER BY id ASC').all(String(eventId));
+const latestAcao = (eventId, acao) => db.prepare('SELECT * FROM acoes WHERE event_id = ? AND acao = ? ORDER BY id DESC LIMIT 1').get(String(eventId), acao);
+function onboardingState(eventId){
+  const marks = ['check_boasvindas','check_removido_vip','check_onboarding_ok'].map(a => latestAcao(eventId, a));
+  const done = marks.filter(Boolean).length;
+  const status = done === 0 ? 'pendente' : done >= 3 ? 'completo' : 'em_processo';
+  return { marks, done, status };
+}
+function claimOf(eventId){ return latestAcao(eventId, 'claim_carrinho'); }
+function resultadoOf(eventId){
+  const c = latestAcao(eventId, 'resultado_conquistou');
+  if (c) return { tipo: 'conquistou', row: c };
+  const n = latestAcao(eventId, 'resultado_nao');
+  if (n) return { tipo: 'nao', row: n };
+  return null;
+}
+function carrinhosAll(){ return allRows().filter(e => e.body && e.body.webhook_evento === 'carrinho.abandonado'); }
+
+// Página de login/acesso
+function loginPage(mode, err){
+  const head = '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Acesso restrito</title><meta name=viewport content="width=device-width,initial-scale=1"><style>' +
+  'body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#17251d;color:#f7f3e9;line-height:1.5}' +
+  '.card{background:#213629;border:1px solid rgba(212,165,63,.45);border-radius:14px;padding:32px;box-shadow:0 4px 16px rgba(0,0,0,.4);text-align:center;min-width:300px;max-width:360px}' +
+  'h1{font-size:28px;font-weight:800;letter-spacing:5px;margin:0 0 4px;color:#eecf7e}' +
+  'p{color:#a8b0a0;font-size:12px;margin:0 0 20px;letter-spacing:1px}' +
+  'input{width:100%;padding:8px 12px;border-radius:8px;border:1px solid rgba(212,165,63,.4);background:#17251d;color:#f7f3e9;font-size:14px;outline:none;box-sizing:border-box;text-align:center;margin-bottom:10px;line-height:1.4}' +
+  'input:focus{border-color:#d4a53f}' +
+  'button{margin-top:6px;width:100%;padding:8px;border:0;border-radius:8px;background:#d4a53f;color:#1a1033;font-weight:600;font-size:14px;cursor:pointer;line-height:1.4}' +
+  'button:hover{filter:brightness(1.08)}' +
+  '.err{color:#e08a8a;font-size:12px;margin-top:12px;min-height:14px}' +
+  'a.troca{display:inline-block;margin-top:14px;color:#a8b0a0;font-size:12px}' +
+  'a.troca:hover{color:#eecf7e}' +
+  '.aviso{background:rgba(212,165,63,.12);border:1px solid rgba(212,165,63,.35);border-radius:8px;color:#eecf7e;font-size:12px;padding:10px;margin-bottom:16px}' +
+  '</style></head><body><div class=card><h1>LEGACY</h1>';
+  const footer = '</div></body></html>';
+  const field = (name, ph, extra) => '<input name="' + name + '" placeholder="' + ph + '" ' + (extra||'') + ' required>';
+  if (mode === 'criar'){
+    return head + '<p>Primeiro acesso</p><div class=aviso>Banco de usuários vazio — crie o primeiro acesso. Este usuário será o administrador.</div>' +
+      '<form method=post action=/login>' +
+      field('nome', 'Seu nome', 'autofocus') +
+      field('pin', 'PIN (4 dígitos)', 'inputmode=numeric maxlength=4 pattern=[0-9]{4} autocomplete=off') +
+      '<input type=hidden name=acao value=criar><button>Criar acesso</button>' +
+      '<div class=err>' + (err ? esc(err) : '') + '</div></form>' + footer;
+  }
+  if (mode === 'cadastro'){
+    return head + '<p>Sou novo aqui</p>' +
+      '<form method=post action=/login>' +
+      field('nome', 'Seu nome', 'autofocus') +
+      field('pin', 'PIN (4 dígitos)', 'inputmode=numeric maxlength=4 pattern=[0-9]{4} autocomplete=off') +
+      field('pin_admin', 'PIN de administrador') +
+      '<input type=hidden name=acao value=cadastro><button>Cadastrar</button>' +
+      '<div class=err>' + (err ? esc(err) : '') + '</div></form>' +
+      '<a class=troca href=/>← Já tenho acesso</a>' + footer;
+  }
+  return head + '<p>Acesso restrito</p>' +
+    '<form method=post action=/login>' +
+    field('nome', 'Nome', 'autofocus') +
+    field('pin', 'PIN (4 dígitos)', 'inputmode=numeric maxlength=4 autocomplete=off') +
+    '<input type=hidden name=acao value=entrar><button>Entrar</button>' +
+    '<div class=err>' + (err ? esc(err) : '') + '</div></form>' +
+    '<a class=troca href="/?cadastro=1">Sou novo aqui →</a>' + footer;
+}
+
+// Middleware: tudo exige sessao, EXCETO webhook (EVO nao autentica) e login/logout
 app.use((req,res,next)=>{
   if (req.path.startsWith('/hook/')) return next();
   if (req.method==='POST' && (req.path==='/login' || req.path==='/logout')) return next();
   if (req.path==='/favicon.ico') return res.status(404).end();
-  const u = getUser(req);
-  if (u){ req.user = u; return next(); }
-  if (req.path.startsWith('/api/')) return res.status(401).json({ok:false, erro:'sem_login'});
+  if (currentUser(req)) return next();
   res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
-  return res.send(accessPage(req.query && req.query.erro ? String(req.query.erro) : ''));
+  const mode = userCount() === 0 ? 'criar' : (req.query && req.query.cadastro ? 'cadastro' : 'entrar');
+  const err = req.query && req.query.erro ? 'Dados inválidos. Verifique e tente novamente.' : '';
+  return res.send(loginPage(mode, err));
 });
-
-function accessPage(err){
-  const primeiro = userCount() === 0;
-  const titulo = primeiro ? 'Criar meu acesso' : 'Bem-vindo de volta';
-  let msg = '';
-  if (err === '1') msg = 'Nome/PIN incorretos.';
-  else if (err === '2') msg = 'PIN de 4 dígitos necessário.';
-  else if (err === '3') msg = 'Nome já existe. Use Entrar.';
-  else if (err === '4') msg = 'PIN-admin incorreto.';
-  else if (err === '5') msg = 'Preencha nome e PIN.';
-  return '<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Acesso</title><meta name=viewport content="width=device-width,initial-scale=1"><style>' +
-  'body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#17251d;color:#f7f3e9;line-height:1.5}' +
-  '.card{background:#213629;border:1px solid rgba(212,165,63,.45);border-radius:14px;padding:32px;box-shadow:0 4px 16px rgba(0,0,0,.4);text-align:center;min-width:300px;max-width:340px}' +
-  'h1{font-size:28px;font-weight:800;letter-spacing:5px;margin:0 0 4px;color:#eecf7e}' +
-  '.tt{color:#a8b0a0;font-size:13px;margin:0 0 20px}' +
-  'input{width:100%;padding:8px 12px;border-radius:8px;border:1px solid rgba(212,165,63,.4);background:#17251d;color:#f7f3e9;font-size:14px;outline:none;box-sizing:border-box;text-align:center;margin-top:10px;line-height:1.4}' +
-  'input:focus{border-color:#d4a53f}' +
-  'button{margin-top:16px;width:100%;padding:8px;border:0;border-radius:8px;background:#d4a53f;color:#1a1033;font-weight:600;font-size:14px;cursor:pointer;line-height:1.4}' +
-  'button:hover{filter:brightness(1.08)}' +
-  '.err{color:#e08a8a;font-size:12px;margin-top:12px;min-height:14px}' +
-  'details{margin-top:20px;text-align:left}summary{cursor:pointer;color:#a8b0a0;font-size:12px}' +
-  '</style></head><body><div class=card><h1>LEGACY</h1><p class=tt>' + titulo + '</p>' +
-  '<form method=post action=/login>' +
-  '<input type=text name=nome placeholder="Seu nome" autofocus required maxlength=40>' +
-  '<input type=password name=pin placeholder="PIN (4 dígitos)" required inputmode=numeric pattern="[0-9]{4}" maxlength=4>' +
-  '<button>' + (primeiro ? 'Criar meu acesso' : 'Entrar') + '</button>' +
-  '<div class=err>' + msg + '</div></form>' +
-  (primeiro ? '<p class=tt style="margin-top:16px;font-size:11px">Primeiro acesso: você será o admin.</p>' :
-    '<details><summary>Sou novo aqui</summary><form method=post action=/login>' +
-    '<input type=text name=nome placeholder="Seu nome" required maxlength=40>' +
-    '<input type=password name=pin placeholder="Crie seu PIN (4 dígitos)" required inputmode=numeric pattern="[0-9]{4}" maxlength=4>' +
-    '<input type=password name=admin placeholder="PIN-admin" required>' +
-    '<button>Cadastrar</button><div class=err></div></form></details>') +
-  '</div></body></html>';
-}
 
 app.post('/login', (req,res)=>{
-  let nome='', pin='', admin='';
-  const raw = typeof req.body === 'string' ? req.body : '';
   let f = {};
+  const raw = typeof req.body === 'string' ? req.body : '';
   if (raw){ try { f = Object.fromEntries(new URLSearchParams(raw)); } catch(e){} }
   else if (req.body && typeof req.body === 'object') f = req.body;
-  nome = String(f.nome||'').trim();
-  pin = String(f.pin||'');
-  admin = String(f.admin||'');
-  if (!nome || !pin) return res.redirect(302, '/?erro=5');
-  if (!/^[0-9]{4}$/.test(pin)) return res.redirect(302, '/?erro=2');
-  const existing = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
-  if (existing){
-    if (safeEq(hashPin(pin, existing.salt), existing.pin_hash)){
-      setLoginCookie(res, existing);
-      return res.redirect(302, '/');
-    }
-    return res.redirect(302, '/?erro=1');
+  const acao = String(f.acao || 'entrar');
+  const nome = String(f.nome || '').trim();
+  const pin = String(f.pin || '').trim();
+  const go = (p) => res.redirect(302, p);
+  if (!nome || !/^[0-9]{4}$/.test(pin)) return go(userCount()===0 ? '/?erro=1' : (acao==='cadastro' ? '/?cadastro=1&erro=1' : '/?erro=1'));
+  if (acao === 'criar'){
+    if (userCount() !== 0) return go('/');
+    if (userByNome(nome)) return go('/?erro=1');
+    db.prepare('INSERT INTO users (nome, pin_hash, criado_em) VALUES (?,?,?)').run(nome, pinHash(nome, pin), new Date().toISOString());
+    const u = userByNome(nome);
+    setSession(res, { id: u.id, nome: u.nome });
+    return go('/');
   }
-  if (userCount() === 0 || safeEq(admin, PAINEL_PASSWORD)){
-    try {
-      const salt = crypto.randomBytes(16).toString('hex');
-      const info = db.prepare('INSERT INTO users (nome, pin_hash, salt, criado_em) VALUES (?,?,?,?)').run(nome, hashPin(pin, salt), salt, new Date().toISOString());
-      const u = db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid);
-      setLoginCookie(res, u);
-      return res.redirect(302, '/');
-    } catch(e){ return res.redirect(302, '/?erro=3'); }
+  if (acao === 'cadastro'){
+    if (!safeEq(String(f.pin_admin || ''), PAINEL_PASSWORD)) return go('/?cadastro=1&erro=1');
+    if (userByNome(nome)) return go('/?cadastro=1&erro=1');
+    db.prepare('INSERT INTO users (nome, pin_hash, criado_em) VALUES (?,?,?)').run(nome, pinHash(nome, pin), new Date().toISOString());
+    const u = userByNome(nome);
+    setSession(res, { id: u.id, nome: u.nome });
+    return go('/');
   }
-  return res.redirect(302, '/?erro=4');
+  const u = userByNome(nome);
+  if (u && safeEq(pinHash(nome, pin), u.pin_hash)){ setSession(res, { id: u.id, nome: u.nome }); return go('/'); }
+  return go('/?erro=1');
 });
-app.post('/logout', (req,res)=>{
-  res.setHeader('Set-Cookie', USER_COOKIE + '=; Max-Age=0; HttpOnly; Path=/');
-  return res.redirect(302, '/');
+app.post('/logout', (req,res)=>{ clearSession(res); return res.redirect(302, '/'); });
+
+// API de acoes (usuario vem do cookie)
+app.post('/api/acao', (req,res)=>{
+  const u = currentUser(req);
+  if (!u) return res.status(401).json({ok:false, erro:'sem sessão'});
+  let b = req.body;
+  if (typeof b === 'string'){ try { b = JSON.parse(b); } catch(e){ b = {}; } }
+  b = b || {};
+  const eventId = String(b.event_id || '');
+  const acao = String(b.acao || '');
+  const texto = b.texto != null ? String(b.texto).slice(0, 500) : null;
+  if (!eventId || !ACAO_VALIDA.includes(acao)) return res.status(400).json({ok:false, erro:'parâmetros inválidos'});
+  const ev = db.prepare('SELECT id FROM events WHERE id = ?').get(eventId);
+  if (!ev) return res.status(404).json({ok:false, erro:'evento não encontrado'});
+  const existingClaim = claimOf(eventId);
+  if (acao === 'claim_carrinho' && existingClaim && existingClaim.user_nome !== u.nome){
+    return res.status(403).json({ok:false, erro:'lead assumido por ' + existingClaim.user_nome});
+  }
+  if (acao === 'resultado_conquistou' || acao === 'resultado_nao'){
+    if (!existingClaim) return res.status(403).json({ok:false, erro:'lead ainda não assumido'});
+    if (existingClaim.user_nome !== u.nome) return res.status(403).json({ok:false, erro:'lead assumido por ' + existingClaim.user_nome});
+  }
+  if (b.undo){
+    const last = db.prepare('SELECT * FROM acoes WHERE event_id = ? AND acao = ? AND user_nome = ? ORDER BY id DESC LIMIT 1').get(eventId, acao, u.nome);
+    if (last) db.prepare('DELETE FROM acoes WHERE id = ?').run(last.id);
+    return res.json({ok:true, undo:true});
+  }
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, texto, ts) VALUES (?,?,?,?,?)').run(eventId, u.nome, acao, texto, new Date().toISOString());
+  res.json({ok:true});
+});
+app.delete('/api/acao', (req,res)=>{
+  const u = currentUser(req);
+  if (!u) return res.status(401).json({ok:false, erro:'sem sessão'});
+  const last = db.prepare('SELECT * FROM acoes WHERE event_id = ? AND acao = ? AND user_nome = ? ORDER BY id DESC LIMIT 1').get(String(req.query.event_id||''), String(req.query.acao||''), u.nome);
+  if (last) db.prepare('DELETE FROM acoes WHERE id = ?').run(last.id);
+  res.json({ok:true});
 });
 
-// ===================== WEBHOOKS =====================
+// Recebe QUALQUER POST em /hook/:origem — responde 200 sempre
 app.post('/hook/:origem', (req,res)=>{
   let body = req.body;
   if (typeof body === 'string'){ try{ body = JSON.parse(body); }catch(e){} }
@@ -198,58 +263,15 @@ app.post('/hook/:origem', (req,res)=>{
   if (info.changes === 0) return res.status(200).json({ok:true, dedupe:true});
   res.status(200).json({ok:true});
 });
-app.get('/hook/healthcheck', (req,res)=>res.status(200).json({ok:true, ts:new Date().toISOString()}));
-
-// ===================== API DE ACOES (exige login via middleware) =====================
-const acoesByEventAll = () => {
-  const map = {};
-  for (const a of db.prepare('SELECT * FROM acoes ORDER BY ts ASC, id ASC').all()){
-    map[a.event_id] = map[a.event_id] || {};
-    map[a.event_id][a.acao] = a;
-  }
-  return map;
-};
-const getClaim = (event_id) => db.prepare("SELECT * FROM acoes WHERE event_id=? AND acao='claim_carrinho' ORDER BY id DESC").get(event_id);
-
-app.post('/api/acao', (req,res)=>{
-  const b = req.body || {};
-  const event_id = String(b.event_id||'');
-  const acao = String(b.acao||'');
-  const detalhe = b.detalhe == null ? null : String(b.detalhe).slice(0, 500);
-  if (!event_id || !ACOES_VALIDAS.includes(acao)) return res.status(400).json({ok:false, erro:'parametros'});
-  const ev = db.prepare('SELECT id FROM events WHERE id=?').get(event_id);
-  if (!ev) return res.status(404).json({ok:false, erro:'evento_inexistente'});
-  if (acao === 'claim_carrinho'){
-    const claim = getClaim(event_id);
-    if (claim) return res.json({ok:false, por: claim.user_nome});
-  }
-  if (acao === 'resultado_conquistou' || acao === 'resultado_nao'){
-    const claim = getClaim(event_id);
-    if (!claim || claim.user_nome !== req.user.nome) return res.json({ok:false, por: claim ? claim.user_nome : null});
-  }
-  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
-    .run(event_id, req.user.nome, acao, detalhe, new Date().toISOString());
-  res.json({ok:true});
-});
-app.post('/api/acao/toggle', (req,res)=>{
-  const b = req.body || {};
-  const event_id = String(b.event_id||'');
-  const acao = String(b.acao||'');
-  if (!event_id || !ACOES_VALIDAS.includes(acao)) return res.status(400).json({ok:false, erro:'parametros'});
-  if (acao === 'claim_carrinho' || acao === 'resultado_conquistou' || acao === 'resultado_nao') return res.status(400).json({ok:false, erro:'nao_toggle'});
-  const info = db.prepare('DELETE FROM acoes WHERE event_id=? AND acao=?').run(event_id, acao);
-  res.json({ok:true, removido: info.changes});
-});
 
 // Export CSV
 function csvField(v){
   let sv = v==null ? '' : String(v);
-  if (/["\r\n,]/.test(sv)) sv = '"' + sv.replace(/"/g,'""') + '"';
+  if (/[,\n\r]/.test(sv)) sv = '"' + sv.replace(/"/g,'""') + '"';
   return sv;
 }
 app.get('/export.csv', (req,res)=>{
   const filtro = req.query.evento || 'todos';
-  const acoesMap = acoesByEventAll();
   let a = allRows().map(rowToEvent);
   if (filtro==='venda.paga' || filtro==='carrinho.abandonado') a = a.filter(e=>e.body && e.body.webhook_evento===filtro);
   const header = ['webhook_evento','venda.id','data','status','cliente.nome','cliente.cpf','cliente.email','cliente.whatsapp','produto.nome','valor','forma_pagamento','origem','link_recuperacao','onboarding_status','onboarding_por','carrinho_assumido_por','carrinho_resultado','ultima_acao_por'];
@@ -257,18 +279,23 @@ app.get('/export.csv', (req,res)=>{
   for (const e of a){
     const b = e.body || {}, cli = b.cliente||{}, prod = b.produto||{}, v = b.venda||{}, c = b.carrinho||{};
     const valor = Number(c.total_venda) || Number(b.valor) || '';
-    const ac = acoesMap[e.id] || {};
-    const nChecks = ['check_boasvindas','check_removido_vip','check_onboarding_ok'].filter(k=>ac[k]).length;
-    const onbStatus = b.webhook_evento==='venda.paga' ? (nChecks===3?'completo':(nChecks>0?'em_processo':'pendente')) : '';
-    const onbPor = [...new Set(['check_boasvindas','check_removido_vip','check_onboarding_ok'].filter(k=>ac[k]).map(k=>ac[k].user_nome))].join('; ');
-    const ultima = db.prepare('SELECT * FROM acoes WHERE event_id=? ORDER BY id DESC').get(e.id);
+    let onbStatus = '—', onbPor = '', claimPor = '', result = '—', ultimaPor = '—';
+    const acts = acoesFor(e.id);
+    if (acts.length){
+      ultimaPor = acts[acts.length-1].user_nome;
+      const st = onboardingState(e.id);
+      onbStatus = b.webhook_evento === 'venda.paga' ? st.status : '—';
+      onbPor = [...new Set(st.marks.filter(Boolean).map(m=>m.user_nome))].join('; ');
+      const claim = claimOf(e.id);
+      claimPor = claim ? claim.user_nome : '';
+      const r = resultadoOf(e.id);
+      result = r ? (r.tipo === 'conquistou' ? 'conquistou' : 'nao') : '—';
+    }
     lines.push([
       b.webhook_evento, v.id ?? v.uid ?? '', e.ts, v.status ?? b.status ?? '',
       cli.nome, cli.cpf ?? cli.documento, cli.email, cli.whatsapp ?? cli.telefone,
       prod.nome, valor, v.forma_pagamento ?? b.forma_pagamento, e.origem, c.link_recuperacao,
-      onbStatus, onbPor, ac.claim_carrinho ? ac.claim_carrinho.user_nome : '',
-      ac.resultado_conquistou ? 'conquistou' : (ac.resultado_nao ? 'nao' : ''),
-      ultima ? ultima.user_nome : ''
+      onbStatus, onbPor, claimPor, result, ultimaPor
     ].map(csvField).join(','));
   }
   res.setHeader('Content-Type','text/csv; charset=utf-8');
@@ -276,16 +303,15 @@ app.get('/export.csv', (req,res)=>{
   res.send('\ufeff' + lines.join('\r\n'));
 });
 
-// ===================== TIMEZONE =====================
+// ===================== TIMEZONE (exibicao em America/Fortaleza) =====================
 const TZ = 'America/Fortaleza';
-const dayFmt = new Intl.DateTimeFormat('en-CA', {timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit'});
+const dayFmt = new Intl.DateTimeFormat('en-CA', {timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit'}); // YYYY-MM-DD
 const hourFmt = new Intl.DateTimeFormat('en-GB', {timeZone: TZ, hour:'numeric', hour12:false});
 function localDay(ts){ try { return dayFmt.format(new Date(ts)); } catch(e){ return String(ts).slice(0,10); } }
 function localHour(ts){ try { return Number(hourFmt.format(new Date(ts))); } catch(e){ return new Date(ts).getHours(); } }
 function fmtDT(ts){ try { return new Date(ts).toLocaleString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
 function fmtTime(ts){ try { return new Date(ts).toLocaleTimeString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
 function fmtCardDT(ts){ try { const t=new Date(ts); const day=localDay(t), today=localDay(Date.now()), yest=localDay(Date.now()-86400000); const hora=fmtTime(t).slice(0,5); if(day===today) return 'hoje às '+hora; if(day===yest) return 'ontem às '+hora; return day.split('-').reverse().slice(0,2).join('/')+' às '+hora; } catch(e){ return fmtDT(ts); } }
-function fmtHM(ts){ try { return fmtTime(ts).slice(0,5); } catch(e){ return String(ts); } }
 
 // ===================== BACKUP DIARIO =====================
 function doBackup(){
@@ -305,7 +331,7 @@ app.get('/backup', (req,res)=>{
   res.json({ok:true, file:f});
 });
 
-// ===================== GRAFICOS =====================
+// ===================== GRAFICO SVG (vendas pagas) =====================
 function chartCard(title, inner){
   return '<div class="card chart-card"><h3>' + title + '</h3>' + inner + '</div>';
 }
@@ -342,32 +368,35 @@ function salesChart(){
   const svgHour = '<svg width="'+W+'" height="'+HH+'" viewBox="0 0 '+W+' '+HH+'" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Vendas por hora (hoje)">'+svgH+'</svg>';
   return chartCard('Vendas por dia (14 dias)', svgDay) + chartCard('Vendas por hora (hoje)', svgHour);
 }
-function recuperacaoPorPessoa(acoesMap){
-  const por = {};
-  for (const [eid, ac] of Object.entries(acoesMap)){
-    if (!ac.claim_carrinho) continue;
-    const nome = ac.claim_carrinho.user_nome;
-    por[nome] = por[nome] || {assumidos:0, conquistados:0};
-    por[nome].assumidos++;
-    if (ac.resultado_conquistou) por[nome].conquistados++;
+
+// Recuperacao por pessoa (tabela no drawer)
+function recoveryTable(){
+  const claims = carrinhosAll().map(e => ({ e, claim: claimOf(e.id) })).filter(x => x.claim);
+  const byPessoa = {};
+  for (const x of claims){
+    const p = byPessoa[x.claim.user_nome] = byPessoa[x.claim.user_nome] || { assumidos: 0, conquistados: 0 };
+    p.assumidos++;
+    const r = resultadoOf(x.e.id);
+    if (r && r.tipo === 'conquistou') p.conquistados++;
   }
-  const nomes = Object.keys(por).sort();
-  if (!nomes.length) return '<div class=card><h3>🛠️ Recuperação por pessoa</h3><div class=empty style="padding:12px 0">Nenhum lead assumido ainda.</div></div>';
-  let rows = '';
+  const nomes = Object.keys(byPessoa).sort((a,b)=> byPessoa[b].assumidos - byPessoa[a].assumidos);
+  if (!nomes.length) return '<div class=empty-rec>Nenhum lead assumido ainda.</div>';
+  let t = '<table class=rectable><tr><th>Pessoa</th><th>Assumidos</th><th>Conquistados</th><th>%</th></tr>';
   for (const n of nomes){
-    const p = por[n], pc = p.assumidos ? Math.round(100*p.conquistados/p.assumidos) : 0;
-    rows += '<tr><td>'+esc(n)+'</td><td>'+p.assumidos+'</td><td>'+p.conquistados+'</td><td>'+pc+'%</td></tr>';
+    const p = byPessoa[n];
+    const pct = p.assumidos ? Math.round(100*p.conquistados/p.assumidos) : 0;
+    t += '<tr><td>' + esc(n) + '</td><td>' + p.assumidos + '</td><td>' + p.conquistados + '</td><td>' + pct + '%</td></tr>';
   }
-  return '<div class=card><h3>🛠️ Recuperação por pessoa</h3><table class=rec><tr><th>Nome</th><th>Assumidos</th><th>Conquistados</th><th>%</th></tr>'+rows+'</table></div>';
+  return t + '</table>';
 }
 
-function startOfToday(){ return Date.parse(localDay(Date.now()) + 'T00:00:00-03:00'); }
+function startOfToday(){ return Date.parse(localDay(Date.now()) + 'T00:00:00-03:00'); } // meia-noite America/Fortaleza (UTC-3, sem DST)
 function fmtBRL(centavos, moeda){
   const cur = moeda || 'BRL';
   try { return (centavos/100).toLocaleString('pt-BR',{style:'currency',currency:cur}); } catch(e){ return 'R$ ' + (centavos/100).toFixed(2); }
 }
 
-// ===================== PAINEL =====================
+// ===================== PAINEL LEGACY =====================
 const PAGE = `<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Painel de Vendas</title><meta name=viewport content="width=device-width,initial-scale=1"><style>
 :root{--gold:#d4a53f;--gold2:#eecf7e;--bg:#17251d;--card:#213629;--line:rgba(212,165,63,.25);--txt:#f7f3e9;--mut:#a8b0a0}
 *{box-sizing:border-box}
@@ -382,12 +411,11 @@ h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)
 .clock{font-variant-numeric:tabular-nums;color:var(--mut)}
 .sair{color:var(--mut);font-size:12px;text-decoration:none;margin-left:8px}
 .sair:hover{color:var(--gold2)}
-.unome{color:var(--gold2);font-size:12px;margin-left:8px}
 .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:24px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,.35)}
 .kpi .lbl{font-size:12px;color:var(--mut)}
-.kpi .val{font-size:26px;font-weight:700;margin-top:4px;color:var(--txt);line-height:1.2}
-.kpi .subv{font-size:12px;color:var(--mut);margin-top:2px}
+.kpi .val{font-size:28px;font-weight:700;margin-top:4px;color:var(--txt);line-height:1.2}
+.kpi .sub{font-size:12px;color:var(--mut);margin-top:2px}
 .bar{display:flex;gap:16px;align-items:center;padding:24px 0 16px}
 .filters{display:flex;gap:8px}
 .filters a{padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;line-height:1.4}
@@ -397,11 +425,13 @@ h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)
 #q:focus{border-color:var(--gold)}
 .btn-csv{padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
 .btn-csv:hover{background:rgba(212,165,63,.1)}
+.charts{display:grid;gap:16px;padding-bottom:8px}
 .chart-card h3{margin:0 0 12px;font-size:16px;font-weight:600;color:var(--txt)}
 .chart-card svg{width:100%;height:auto;display:block}
-.rec{width:100%;border-collapse:collapse;font-size:13px}
-.rec th,.rec td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
-.rec th{color:var(--mut);font-weight:600;font-size:12px}
+.rectable{width:100%;border-collapse:collapse;font-size:13px}
+.rectable th{color:var(--mut);text-align:left;font-weight:600;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
+.rectable td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06)}
+.empty-rec{color:var(--mut);font-size:13px;padding:8px 0}
 #feed{padding:16px 0 40px}
 .ev{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.35)}
 .ev .meta{color:var(--mut);font-size:12px;margin-bottom:8px}
@@ -413,21 +443,11 @@ h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)
 .badge{padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}
 .b-gold{background:rgba(212,165,63,.15);color:var(--gold2);border:1px solid var(--line)}
 .b-orange{background:rgba(205,137,0,.15);color:#ffc46b;border:1px solid rgba(205,137,0,.35)}
-.b-blue{background:rgba(80,150,220,.15);color:#8ec2f0;border:1px solid rgba(80,150,220,.35)}
-.b-green{background:rgba(57,217,138,.15);color:#39d98a;border:1px solid rgba(57,217,138,.35)}
+.b-blue{background:rgba(80,150,255,.15);color:#9cc4ff;border:1px solid rgba(80,150,255,.35)}
+.b-green{background:rgba(57,217,138,.15);color:#7fe6b0;border:1px solid rgba(57,217,138,.35)}
 .b-gray{background:rgba(255,255,255,.05);color:var(--mut);border:1px solid rgba(255,255,255,.1)}
 .hl{margin-top:8px;font-size:16px;font-weight:600;color:var(--gold2)}
-.btn{display:inline-block;margin-top:8px;background:var(--gold);color:#1a1033;font-weight:600;padding:8px 16px;border-radius:8px;text-decoration:none;font-size:13px;border:0;cursor:pointer;font-family:inherit}
-.btn:hover{filter:brightness(1.08)}
-.btn.sec{background:transparent;color:var(--gold2);border:1px solid var(--line)}
-.ops{margin-top:10px;display:flex;flex-direction:column;gap:6px}
-.op{display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap}
-.chk{cursor:pointer;color:var(--gold2);text-decoration:underline dotted;font-size:13px}
-.chk.on{color:#39d98a;text-decoration:none;cursor:pointer}
-.ckdone{color:#39d98a;font-size:12px}
-.claim{margin-top:10px;font-size:13px;color:var(--mut)}
-.claim .quem{color:var(--gold2);font-weight:600}
-.nota{margin-top:6px;font-size:12px;color:var(--mut)}
+.btn{display:inline-block;margin-top:8px;background:var(--gold);color:#1a1033;font-weight:600;padding:8px 16px;border-radius:8px;text-decoration:none;font-size:13px;border:0;cursor:pointer}
 .chartbar{display:flex;padding:12px 0 0}
 .btn-charts{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;cursor:pointer;background:transparent;line-height:1.4}
 .btn-charts:hover{background:rgba(212,165,63,.1)}
@@ -438,28 +458,39 @@ h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)
 .charts-head h3{margin:0;font-size:16px;color:var(--gold2)}
 .btn-close{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--gold);color:#1a1033;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;line-height:1.4}
 @media(max-width:640px){.charts.open{inset:0;top:0;left:0;transform:none;width:100%;max-height:100%;border-radius:0;padding:12px 16px}}
+.btn:hover{filter:brightness(1.08)}
+.checks{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.checkrow{display:flex;align-items:center;gap:8px;font-size:13px}
+.checkrow input{width:16px;height:16px;accent-color:var(--gold);cursor:pointer}
+.stamp{font-size:12px;color:var(--mut)}
+.claimrow{margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.claimrow input{background:#17251d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:7px 10px;font-size:13px;outline:none;min-width:160px;flex:1}
+.claimrow input:focus{border-color:var(--gold)}
+.btn-sm{padding:7px 12px;border-radius:8px;border:0;background:var(--gold);color:#1a1033;font-weight:600;font-size:13px;cursor:pointer}
+.btn-sm.sec{background:transparent;border:1px solid var(--line);color:var(--gold2)}
+.btn-sm:hover{filter:brightness(1.08)}
 details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#cfd8c6;background:#122019;border-radius:8px;padding:12px}
 .empty{color:var(--mut);text-align:center;padding:40px 0;font-size:14px}
 @media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:640px){
 .wrap{padding:0 16px}
 .htop{gap:8px}h1{font-size:20px;letter-spacing:3px}
-.kpis{grid-template-columns:repeat(2,1fr);gap:8px;padding:16px 0 8px}
+.kpis{gap:8px;padding:16px 0 8px}
 .bar{flex-direction:column;align-items:stretch;gap:8px}
 #q{min-width:0}
 .charts{gap:8px}
 .ev{padding:12px 16px;margin-bottom:8px}
 }
 </style></head><body>
-<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span class=unome>👤 __UNOME__</span><form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div></div></div></header>
+<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span>· __USER__</span><form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div></div></div></header>
 <div class=wrap>
 <div class=kpis>
-<div class="card kpi"><div class=lbl>Faturamento hoje</div><div class=val>__FAT__</div><div class=subv>__PGD__ vendas pagas</div></div>
-<div class="card kpi"><div class=lbl>Vendas pagas hoje</div><div class=val>__PGD__</div><div class=subv>__PGT__ no total</div></div>
-<div class="card kpi"><div class=lbl>⚠️ Onboarding pendente</div><div class=val>__ONBP__</div><div class=subv>de __PGD__ vendas pagas hoje</div></div>
-<div class="card kpi"><div class=lbl>Carrinhos abandonados hoje</div><div class=val>__CRD__</div><div class=subv>__CRT__ no total</div></div>
-<div class="card kpi"><div class=lbl>🛠️ Recuperação</div><div class=val>__REC__</div><div class=subv>__ASSUM__ assumidos · __CONQ__ conquistados</div></div>
-<div class="card kpi"><div class=lbl>Eventos hoje</div><div class=val>__TTD__</div><div class=subv>__TOT__ no total</div></div>
+<div class="card kpi"><div class=lbl>Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
+<div class="card kpi"><div class=lbl>Vendas pagas hoje</div><div class=val>__PGD__</div><div class=sub>__PGT__ no total</div></div>
+<div class="card kpi"><div class=lbl>⚠️ Onboarding pendente</div><div class=val>__ONBP__</div><div class=sub>__ONBT__ vendas no total</div></div>
+<div class="card kpi"><div class=lbl>🛠️ Recuperação</div><div class=val>__RCASSUM__</div><div class=sub>__RCCONQ__ conquistados · __RCPCT__% conversão</div></div>
+<div class="card kpi"><div class=lbl>Carrinhos abandonados hoje</div><div class=val>__CRD__</div><div class=sub>__CRT__ no total</div></div>
+<div class="card kpi"><div class=lbl>Eventos hoje</div><div class=val>__TTD__</div><div class=sub>__TOT__ no total</div></div>
 </div>
 <div class=chartbar><a id=btn-charts class=btn-charts href=#>📈 Gráficos · __CHARTMINI__</a></div>
 <div class=bar>
@@ -468,15 +499,21 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <a class=btn-csv href="/export.csv?evento=__EVENC__">Exportar CSV</a>
 </div>
 <div id=feed>__FEED__</div>
-<div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART____RECP__</div>
+<div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART__</div>
 </div>
 <script>
 function nowClock(){return new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})}
 setInterval(function(){var c=document.getElementById('clock');if(c)c.textContent=nowClock()},1000);
 (function(){var c=document.getElementById('clock');if(c)c.textContent=nowClock()})();
-var qi=document.getElementById('q');qi.value=sessionStorage.getItem('legacy_q')||'';
-function fltr(){var q=qi.value.toLowerCase();sessionStorage.setItem('legacy_q',q);document.querySelectorAll('.ev').forEach(function(el){el.style.display=el.dataset.s.includes(q)?'':'none'})}
+const qi=document.getElementById('q');qi.value=sessionStorage.getItem('legacy_q')||'';
+function fltr(){const q=qi.value.toLowerCase();sessionStorage.setItem('legacy_q',q);document.querySelectorAll('.ev').forEach(el=>{el.style.display=el.dataset.s.includes(q)?'':'none'})}
 fltr();
+function apiAcao(eventId,acao,undo,texto){
+  fetch('/api/acao',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:eventId,acao:acao,undo:!!undo,texto:texto||null})})
+   .then(function(r){return r.json()})
+   .then(function(j){ if(!j.ok){alert(j.erro||'Erro na ação');} location.reload(); })
+   .catch(function(){location.reload()});
+}
 (function(){
 var drawer=document.getElementById('charts-drawer'),btnC=document.getElementById('btn-charts');
 function applyCharts(){var open=sessionStorage.getItem('legacy_charts')==='1';drawer.classList.toggle('open',open);btnC.classList.toggle('on',open);}
@@ -484,71 +521,90 @@ btnC.addEventListener('click',function(e){e.preventDefault();sessionStorage.setI
 document.getElementById('charts-close').addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts','0');applyCharts();});
 applyCharts();
 })();
-function api(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){if(r.status===401){location.href='/';return null}return r.json()})}
-function toggleCheck(eid,acao,el){
-  if(el.classList.contains('on')){api('/api/acao/toggle',{event_id:eid,acao:acao}).then(function(j){if(j&&j.ok)location.reload()});}
-  else{api('/api/acao',{event_id:eid,acao:acao}).then(function(j){if(j&&j.ok)location.reload()});}
-}
-function assumir(eid){
-  api('/api/acao',{event_id:eid,acao:'claim_carrinho'}).then(function(j){
-    if(!j)return;
-    if(!j.ok&&j.por){alert('Lead já assumido por '+j.por);}
-    if(j.ok)location.reload();
-  });
-}
-function resultado(eid,acao){
-  var nota='';
-  if(acao==='resultado_nao'){nota=prompt('Nota (opcional):')||'';}
-  api('/api/acao',{event_id:eid,acao:acao,detalhe:nota}).then(function(j){
-    if(!j)return;
-    if(!j.ok&&j.por){alert('Lead assumido por '+j.por+' — só quem assumiu pode marcar resultado.');}
-    if(j.ok)location.reload();
-  });
-}
-setTimeout(function(){location.href=location.pathname+(location.search||'')},15000);
+setTimeout(()=>{location.href=location.pathname+(location.search||'')},15000);
 </script></body></html>`;
 
 app.get('/', (req,res)=>{
   const filtro = req.query.evento || 'todos';
   const all = allRows().slice(-5000).map(rowToEvent);
-  const acoesMap = acoesByEventAll();
   const t0 = startOfToday();
   const evo = all.filter(e=>!e.dedup && e.body && e.body.webhook_evento);
-  const pagasHoje = evo.filter(e=>e.body.webhook_evento==='venda.paga' && new Date(e.ts).getTime()>=t0);
-  const fatHoje = pagasHoje.reduce((s,e)=> s + (Number(e.body.carrinho && e.body.carrinho.total_venda) || Number(e.body.valor) || 0), 0);
-  let onbPendente = 0;
-  for (const e of pagasHoje){
-    const ac = acoesMap[e.id]||{};
-    const done = ['check_boasvindas','check_removido_vip','check_onboarding_ok'].filter(k=>ac[k]).length;
-    if (done < 3) onbPendente++;
+  const fatHoje = evo.filter(e=>e.body.webhook_evento==='venda.paga' && new Date(e.ts).getTime()>=t0)
+    .reduce((s,e)=> s + (Number(e.body.carrinho && e.body.carrinho.total_venda) || Number(e.body.valor) || 0), 0);
+  const pagasAllEv = evo.filter(e=>e.body.webhook_evento==='venda.paga');
+  const carrAllEv = evo.filter(e=>e.body.webhook_evento==='carrinho.abandonado');
+  let onbPend = 0;
+  for (const e of pagasAllEv){ if (onboardingState(e.id).status !== 'completo') onbPend++; }
+  let rcAssum = 0, rcConq = 0;
+  for (const e of carrAllEv){
+    if (claimOf(e.id)) rcAssum++;
+    const r = resultadoOf(e.id);
+    if (r && r.tipo === 'conquistou') rcConq++;
   }
-  let assumidos=0, conquistados=0;
-  for (const [eid, ac] of Object.entries(acoesMap)){
-    if (ac.claim_carrinho){ assumidos++; if (ac.resultado_conquistou) conquistados++; }
-  }
-  const recPct = assumidos ? Math.round(100*conquistados/assumidos) : 0;
+  const rcPct = rcAssum ? Math.round(100*rcConq/rcAssum) : 0;
   const stats = {
     fatHoje: fmtBRL(fatHoje),
-    pagasDia: pagasHoje.length,
-    pagasTotal: evo.filter(e=>e.body.webhook_evento==='venda.paga').length,
-    carrDia: evo.filter(e=>e.body.webhook_evento==='carrinho.abandonado' && new Date(e.ts).getTime()>=t0).length,
-    carrTotal: evo.filter(e=>e.body.webhook_evento==='carrinho.abandonado').length,
+    pagasDia: pagasAllEv.filter(e=>new Date(e.ts).getTime()>=t0).length,
+    pagasTotal: pagasAllEv.length,
+    onbPend, onbTotal: pagasAllEv.length,
+    rcAssum, rcConq, rcPct,
+    carrDia: carrAllEv.filter(e=>new Date(e.ts).getTime()>=t0).length,
+    carrTotal: carrAllEv.length,
     totalDia: all.filter(e=>!e.dedup && new Date(e.ts).getTime()>=t0).length,
     total: all.filter(e=>!e.dedup).length
   };
-
   let a = all.slice(-300).reverse();
   if (filtro==='venda.paga' || filtro==='carrinho.abandonado') a = a.filter(e=>e.body && e.body.webhook_evento===filtro);
+  const me = currentUser(req);
 
-  const checkDef = [
-    ['check_boasvindas','Lead no grupo de boas-vindas'],
-    ['check_removido_vip','Removido do grupo VIP com msg'],
-    ['check_onboarding_ok','Onboarding concluído']
-  ];
+  const onboardingBlock = (e)=>{
+    const st = onboardingState(e.id);
+    const items = [
+      ['check_boasvindas','Lead no grupo de boas-vindas'],
+      ['check_removido_vip','Removido do grupo VIP com msg'],
+      ['check_onboarding_ok','Onboarding concluído']
+    ];
+    const badge = st.status==='completo' ? '<span class="badge b-green">✅ Completo</span>'
+      : st.status==='em_processo' ? '<span class="badge b-blue">🔵 Em processo</span>'
+      : '<span class="badge b-gray">🟡 Pendente</span>';
+    let rows = '<div class=checks><div>' + badge + '</div>';
+    for (const par of items){
+      const mark = latestAcao(e.id, par[0]);
+      rows += '<label class=checkrow><input type=checkbox ' + (mark?'checked':'') + ' onchange="apiAcao(\''+e.id+'\',\''+par[0]+'\',' + (mark?'true':'false') + ')"> ' + par[1]
+        + (mark ? ' <span class=stamp>✓ por ' + esc(mark.user_nome) + ' às ' + fmtTime(mark.ts).slice(0,5) + '</span>' : '') + '</label>';
+    }
+    return rows + '</div>';
+  };
+
+  const carrinhoBlock = (e)=>{
+    const claim = claimOf(e.id);
+    if (!claim){
+      return '<div class=claimrow><button class=btn-sm onclick="apiAcao(\''+e.id+'\',\'claim_carrinho\',false)">🙋 Assumir lead</button></div>';
+    }
+    let out = '<div class=claimrow><span class=stamp>🙋 Assumido por <b>' + esc(claim.user_nome) + '</b> às ' + fmtTime(claim.ts).slice(0,5) + '</span></div>';
+    const r = resultadoOf(e.id);
+    if (me && me.nome === claim.user_nome){
+      if (!r){
+        const obsId = 'obs_' + e.id;
+        out += '<div class=claimrow><input id=' + obsId + ' placeholder="observação (opcional)">'
+          + '<button class=btn-sm onclick="apiAcao(\''+e.id+'\',\'resultado_conquistou\',false,document.getElementById(\''+obsId+'\').value)">✅ Conquistou</button>'
+          + '<button class="btn-sm sec" onclick="apiAcao(\''+e.id+'\',\'resultado_nao\',false,document.getElementById(\''+obsId+'\').value)">❌ Não conquistou</button></div>';
+      } else {
+        out += '<div class=claimrow><span class="badge ' + (r.tipo==='conquistou'?'b-green':'b-gray') + '">' + (r.tipo==='conquistou'?'✅ Conquistou':'❌ Não conquistou') + '</span>'
+          + (r.row.texto ? ' <span class=stamp>' + esc(r.row.texto) + '</span>' : '')
+          + ' <span class=stamp>por ' + esc(r.row.user_nome) + ' às ' + fmtTime(r.row.ts).slice(0,5) + '</span>'
+          + ' <button class="btn-sm sec" onclick="apiAcao(\''+e.id+'\',\'resultado_' + (r.tipo==='conquistou'?'conquistou':'nao') + '\',true)">desfazer</button>'
+          + ' <button class="btn-sm sec" onclick="apiAcao(\''+e.id+'\',\'claim_carrinho\',true)">liberar lead</button></div>';
+      }
+    } else if (r){
+      out += '<div class=claimrow><span class="badge ' + (r.tipo==='conquistou'?'b-green':'b-gray') + '">' + (r.tipo==='conquistou'?'✅ Conquistou':'❌ Não conquistou') + '</span>'
+        + ' <span class=stamp>por ' + esc(r.row.user_nome) + '</span></div>';
+    }
+    return out;
+  };
 
   const card = (e)=>{
     const b = e.body || {};
-    const ac = acoesMap[e.id]||{};
     if (!b.webhook_evento){
       return '<div class=ev data-s="'+esc(JSON.stringify(b).toLowerCase())+'"><div class=meta>#'+esc(e.id)+' · <b>'+esc(e.origem)+'</b> · '+fmtCardDT(e.ts)+'</div><details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
     }
@@ -562,34 +618,14 @@ app.get('/', (req,res)=>{
     if (b.webhook_evento === 'venda.paga'){
       const v = Number(c.total_venda) || Number(b.valor);
       if (v) extra += '<div class=hl>💰 '+fmtBRL(v, c.moeda)+'</div>';
-      const done = checkDef.filter(d=>ac[d[0]]).length;
-      const stBadge = done===3 ? '<span class="badge b-green">✅ Onboarding completo</span>' : (done>0 ? '<span class="badge b-blue">🔵 Em processo</span>' : '<span class="badge b-orange">🟡 Pendente</span>');
-      let ops = '<div class=ops><div class=op>'+stBadge+'</div>';
-      for (const [k,lbl] of checkDef){
-        if (ac[k]) ops += '<div class=op><span class="chk on" onclick="toggleCheck(\''+esc(e.id)+'\',\''+k+'\',this)">☑ '+esc(lbl)+'</span> <span class=ckdone>✓ por '+esc(ac[k].user_nome)+' às '+fmtHM(ac[k].ts)+'</span></div>';
-        else ops += '<div class=op><span class=chk onclick="toggleCheck(\''+esc(e.id)+'\',\''+k+'\',this)">☐ '+esc(lbl)+'</span></div>';
-      }
-      ops += '</div>';
-      extra += ops;
+      extra += onboardingBlock(e);
     }
     if (b.webhook_evento === 'carrinho.abandonado'){
       const mins = c.criado_em ? Math.max(0,Math.floor((Date.now()-new Date(c.criado_em).getTime())/60000)) : null;
       if (c.total_venda) extra += '<div class=hl>💰 '+fmtBRL(c.total_venda, c.moeda)+(mins!=null?' · há '+mins+' min':'')+'</div>';
       else if (mins!=null) extra += '<div class=hl>há '+mins+' min</div>';
       if (c.link_recuperacao) extra += '<a class=btn href="'+esc(c.link_recuperacao)+'" target=_blank rel=noopener>🔗 Recuperar</a>';
-      const claim = ac.claim_carrinho;
-      if (!claim){
-        extra += '<div class=claim><button class="btn sec" onclick="assumir(\''+esc(e.id)+'\')">🙋 Assumir lead</button></div>';
-      } else if (claim.user_nome === req.user.nome){
-        let cl = '<div class=claim><span class=quem>Assumido por você</span> às '+fmtHM(claim.ts)+'</div>';
-        if (ac.resultado_conquistou) cl += '<div class="badge b-green" style="display:inline-block;margin-top:8px">✅ Conquistou</div>';
-        else if (ac.resultado_nao) cl += '<div class="badge b-gray" style="display:inline-block;margin-top:8px">❌ Não conquistou'+(ac.resultado_nao.detalhe?' · '+esc(ac.resultado_nao.detalhe):'')+'</div>';
-        else cl += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class=btn onclick="resultado(\''+esc(e.id)+'\',\'resultado_conquistou\')">✅ Conquistou</button><button class="btn sec" onclick="resultado(\''+esc(e.id)+'\',\'resultado_nao\')">❌ Não conquistou</button></div>';
-        extra += cl;
-      } else {
-        extra += '<div class=claim>🔒 Assumido por <span class=quem>'+esc(claim.user_nome)+'</span> às '+fmtHM(claim.ts)+'</div>';
-      }
-      if (ac.nota) extra += '<div class=nota>📝 '+esc(ac.nota.detalhe||'')+' — '+esc(ac.nota.user_nome)+'</div>';
+      extra += carrinhoBlock(e);
     }
     const searchable = JSON.stringify([cli.nome,cli.whatsapp,prod.nome]).toLowerCase();
     return '<div class=ev data-s="'+esc(searchable)+'"><div class=meta>#'+esc(e.id)+' · 🕒 <span title="'+esc(fmtDT(e.ts))+'">'+fmtCardDT(e.ts)+'</span></div>'
@@ -605,21 +641,20 @@ app.get('/', (req,res)=>{
   const feed = a.map(card).join('') || '<div class=empty>Nenhum evento ainda. Faça um POST em /hook/teste.</div>';
   const cls = f => (filtro===f?'on':'');
   let out = PAGE
-    .replace('__UNOME__', esc(req.user.nome))
     .replace('__FAT__', stats.fatHoje)
     .replace(/__PGD__/g, stats.pagasDia).replace('__PGT__', stats.pagasTotal)
-    .replace('__ONBP__', onbPendente)
+    .replace('__ONBP__', stats.onbPend).replace('__ONBT__', stats.onbTotal)
+    .replace('__RCASSUM__', stats.rcAssum).replace('__RCCONQ__', stats.rcConq).replace('__RCPCT__', stats.rcPct)
     .replace('__CRD__', stats.carrDia).replace('__CRT__', stats.carrTotal)
-    .replace('__REC__', recPct + '%').replace('__ASSUM__', assumidos).replace('__CONQ__', conquistados)
     .replace('__TOT__', stats.total).replace('__TTD__', stats.totalDia)
     .replace('__C0__', cls('todos')).replace('__C1__', cls('venda.paga')).replace('__C2__', cls('carrinho.abandonado'))
     .replace('__EVENC__', encodeURIComponent(filtro))
     .replace('__CHARTMINI__', stats.pagasDia + (stats.pagasDia===1 ? ' venda hoje' : ' vendas hoje'))
-    .replace('__CHART__', salesChart())
-    .replace('__RECP__', recuperacaoPorPessoa(acoesMap))
+    .replace('__CHART__', salesChart() + chartCard('Recuperação por pessoa', recoveryTable()))
+    .replace('__USER__', me ? '👤 ' + esc(me.nome) : '')
     .replace('__FEED__', feed);
   res.setHeader('Content-Type','text/html; charset=utf-8');
   res.send(out);
 });
-app.listen(3210, ()=>console.log('Hook collector Legacy on :3210 (SQLite, modo operação)'));
-
+const PORT = process.env.PORT || 3210;
+app.listen(PORT, ()=>console.log('Hook collector Legacy on :' + PORT + ' (SQLite, modo operação)'));
