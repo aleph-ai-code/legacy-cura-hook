@@ -228,6 +228,19 @@ app.post('/api/acao', (req,res)=>{
   if (!eventId || !ACAO_VALIDA.has(b.acao)) return res.status(400).json({ok:false, erro:'parametros_invalidos'});
   const exists = db.prepare('SELECT 1 FROM events WHERE id=?').get(eventId);
   if (!exists) return res.status(404).json({ok:false, erro:'evento_nao_encontrado'});
+  const lastOfAcao = db.prepare('SELECT * FROM acoes WHERE event_id=? AND acao=? ORDER BY id DESC LIMIT 1').get(eventId, b.acao);
+  if (b.acao === 'claim_carrinho'){
+    if (lastOfAcao){
+      if (lastOfAcao.user_nome !== req.user.nome) return res.status(403).json({ok:false, erro:'lead assumido por ' + lastOfAcao.user_nome, assumido_por: lastOfAcao.user_nome});
+      return res.json({ok:true, assumido_por: req.user.nome});
+    }
+  }
+  if (b.acao === 'resultado_conquistou' || b.acao === 'resultado_nao' || b.acao === 'nota'){
+    const claim = db.prepare("SELECT * FROM acoes WHERE event_id=? AND acao='claim_carrinho' ORDER BY id DESC LIMIT 1").get(eventId);
+    if (!claim) return res.status(403).json({ok:false, erro:'lead ainda nao assumido'});
+    if (claim.user_nome !== req.user.nome) return res.status(403).json({ok:false, erro:'lead assumido por ' + claim.user_nome});
+  }
+  if (lastOfAcao && (b.acao === 'resultado_conquistou' || b.acao === 'resultado_nao')) return res.status(409).json({ok:false, erro:'resultado ja registrado (use toggle)'});
   db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
     .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString());
   res.json({ok:true});
@@ -239,7 +252,10 @@ app.post('/api/acao/toggle', (req,res)=>{
   if (!eventId || !ACAO_VALIDA.has(b.acao)) return res.status(400).json({ok:false, erro:'parametros_invalidos'});
   const last = db.prepare('SELECT id FROM acoes WHERE event_id=? AND acao=? ORDER BY id DESC LIMIT 1').get(eventId, b.acao);
   if (last){ db.prepare('DELETE FROM acoes WHERE id=?').run(last.id); return res.json({ok:true, removido:true}); }
-  return res.status(404).json({ok:false, erro:'nada_para_remover'});
+  if (b.acao === 'claim_carrinho') return res.status(404).json({ok:false, erro:'nada_para_remover'});
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
+    .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString());
+  return res.json({ok:true, marcado:true});
 });
 
 // Export CSV
@@ -650,4 +666,5 @@ app.get('/', (req,res)=>{
   res.setHeader('Content-Type','text/html; charset=utf-8');
   res.send(out);
 });
-app.listen(3210, ()=>console.log('Hook collector Legacy on :3210 (SQLite, modo operacao)'));
+const PORT = Number(process.env.PORT) || 3210;
+app.listen(PORT, ()=>console.log('Hook collector Legacy on :' + PORT + ' (SQLite, modo operacao)'));
