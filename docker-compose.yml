@@ -1,0 +1,10 @@
+services:
+  hook:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3210"
+    volumes:
+      - hook-data:/data
+volumes:
+  hook-data:
