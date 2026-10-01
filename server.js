@@ -111,6 +111,28 @@ function pinFraco(pin){
   return null;
 }
 const MSG_PIN_FRACO = 'PIN muito fraco: nao use numero repetido ou sequencia.';
+const MSG_PIN_EM_USO = 'Este PIN ja esta em uso, escolha outro.';
+// PIN precisa ser UNICO entre os usuarios (login e feito so pelo PIN)
+function pinEmUso(pin, excluirId){
+  for (const u of db.prepare('SELECT id, pin_hash FROM users').all()){
+    if (excluirId != null && u.id === excluirId) continue;
+    if (checkPin(pin, u.pin_hash)) return true;
+  }
+  return false;
+}
+// Rate limit do login: 5 erros em 5 min = bloqueio de 15 min por IP
+const LOGIN_FAILS = new Map();
+const RL_JANELA = 5*60*1000, RL_MAX = 5, RL_BLOQUEIO = 15*60*1000;
+function loginBloqueado(ip){ const e = LOGIN_FAILS.get(ip); return !!(e && e.blockUntil && Date.now() < e.blockUntil); }
+function loginRegFail(ip){
+  const now = Date.now();
+  const e = LOGIN_FAILS.get(ip) || { count: 0, window: now };
+  if (now - e.window > RL_JANELA){ e.window = now; e.count = 0; }
+  e.count++;
+  if (e.count >= RL_MAX) e.blockUntil = now + RL_BLOQUEIO;
+  LOGIN_FAILS.set(ip, e);
+}
+function loginRegOk(ip){ LOGIN_FAILS.delete(ip); }
 function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
 const usersCount = () => db.prepare('SELECT COUNT(*) c FROM users').get().c;
 function logAud(usuario, acao, sobre, detalhe){ try { db.prepare('INSERT INTO auditoria (ts, usuario, acao, sobre, detalhe) VALUES (?,?,?,?,?)').run(new Date().toISOString(), usuario==null?null:String(usuario), String(acao), sobre==null?null:String(sobre).slice(0,200), detalhe==null?null:String(detalhe).slice(0,500)); } catch(e){ console.error('auditoria:', e.message); } }
@@ -168,13 +190,12 @@ function loginPage(err, mode){
       '<form method=post action=/login/criar>' +
       '<input type=text name=nome placeholder="Seu nome" autofocus required maxlength=60>' +
       '<input type=password name=pin placeholder="PIN (mínimo 6 dígitos)" required inputmode=numeric maxlength=12 style="margin-top:12px">' +
-      '<button>Criar meu acesso</button><div class=err>' + (err ? 'Nome já existe ou PIN inválido (6 dígitos).' : '') + '</div></form>');
+      '<button>Criar meu acesso</button><div class=err>' + (err==='pin_uso' ? MSG_PIN_EM_USO : (err ? 'Nome já existe ou PIN inválido/fraco (mínimo 6 dígitos).' : '')) + '</div></form>');
   }
   return pageShell('Acesso restrito',
     '<form method=post action=/login>' +
-    '<input type=text name=nome placeholder="Nome" autofocus required maxlength=60>' +
-    '<input type=password name=pin placeholder="PIN (mínimo 6 dígitos)" required inputmode=numeric maxlength=12 style="margin-top:12px">' +
-    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Nome já existe ou PIN inválido (6 dígitos).' : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : (err==='bloqueado' ? 'Acesso bloqueado. Fale com o administrador.' : (err==='fraco' ? 'PIN muito fraco: nao use numero repetido ou sequencia.' : '')))))))) + '</div></form>' +
+    '<input type=password name=pin placeholder="Seu PIN" autofocus required inputmode=numeric maxlength=12>' +
+    '<button>Entrar</button><div class=err>' + (err==='login' ? 'PIN incorreto.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='pin_uso' ? MSG_PIN_EM_USO : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : (err==='bloqueado' ? 'Acesso bloqueado. Fale com o administrador.' : (err==='fraco' ? 'PIN muito fraco: nao use numero repetido ou sequencia.' : (err==='ratelimit' ? 'Muitas tentativas. Aguarde 15 minutos.' : '')))))))))) + '</div></form>' +
     '<div class=alt><h2>SOU NOVO AQUI</h2>' +
     '<form method=post action=/login/novo>' +
     '<input type=text name=nome placeholder="Seu nome" required maxlength=60>' +
@@ -189,7 +210,7 @@ app.use((req,res,next)=>{
   const user = getAuth(req);
   if (user){ req.user = user; return next(); }
   if (req.path.startsWith('/api/')) return res.status(401).json({ok:false, erro:'nao_autenticado'});
-  const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar', 'pendente':'pendente', 'existe':'existe', 'ok':'ok', 'bloqueado':'bloqueado' };
+  const errMap = { '1':'login', 'novo':'novo', 'admin':'admin', 'criar':'criar', 'pendente':'pendente', 'existe':'existe', 'ok':'ok', 'bloqueado':'bloqueado', 'ratelimit':'ratelimit' };
   res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
   return res.send(loginPage(errMap[req.query && req.query.erro] || '', req.query && req.query.modo === 'criar' ? 'criar' : undefined));
 });
@@ -200,19 +221,30 @@ function formFields(req){
   return { nome: raw.nome||'', pin: raw.pin||'', pin_admin: raw.pin_admin||'' };
 }
 app.post('/login', (req,res)=>{
+  const ip = req.ip || (req.socket && req.socket.remoteAddress) || '?';
+  if (loginBloqueado(ip)){
+    logAud(null, 'login_rate_limit', ip, 'bloqueio temporario ativo');
+    return res.redirect(302, '/?erro=ratelimit');
+  }
   const f = formFields(req);
-  const nomeL = String(f.nome||'').trim();
-  const u = db.prepare('SELECT * FROM users WHERE nome = ?').get(nomeL);
-  if (u && u.status === 'pendente') return res.redirect(302, '/?erro=pendente');
-  if (u && u.status === 'bloqueado'){ logAud(nomeL, 'login_bloqueado', nomeL); return res.redirect(302, '/?erro=bloqueado'); }
-  if (u && u.status === 'ativo' && checkPin(f.pin, u.pin_hash)){ logAud(nomeL, 'login_ok', nomeL); setAuthCookie(res, u); return res.redirect(302, '/'); }
-  logAud(nomeL, 'login_falho', nomeL);
+  const pin = String(f.pin||'');
+  if (!pin) return res.redirect(302, '/?erro=1');
+  let match = null;
+  for (const u of db.prepare('SELECT * FROM users ORDER BY id ASC').all()){
+    if (checkPin(pin, u.pin_hash)){ match = u; break; }
+  }
+  if (match && match.status === 'pendente') return res.redirect(302, '/?erro=pendente');
+  if (match && match.status === 'bloqueado'){ logAud(match.nome, 'login_bloqueado', match.nome); return res.redirect(302, '/?erro=bloqueado'); }
+  if (match && match.status === 'ativo'){ loginRegOk(ip); logAud(match.nome, 'login_ok', match.nome); setAuthCookie(res, match); return res.redirect(302, '/'); }
+  loginRegFail(ip);
+  logAud(null, 'login_falho', ip, 'PIN nao encontrado');
   return res.redirect(302, '/?erro=1');
 });
 app.post('/login/criar', (req,res)=>{
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
   if (usersCount() > 0 || !nome || pinFraco(f.pin)) return res.redirect(302, '/?erro=' + (pinFraco(f.pin)==='formato' ? '1' : 'fraco') + '&modo=criar');
+  if (pinEmUso(f.pin)) return res.redirect(302, '/?erro=pin_uso&modo=criar');
   try {
     const stored = makePinHash(f.pin); const info = db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
     logAud(nome, 'cadastro_criado', nome, 'primeiro acesso (admin)');
@@ -225,6 +257,7 @@ app.post('/login/novo', (req,res)=>{
   const nome = String(f.nome||'').trim();
   const fraco = pinFraco(f.pin);
   if (!nome || fraco) return res.redirect(302, '/?erro=' + (fraco==='formato' ? 'existe' : 'fraco'));
+  if (pinEmUso(f.pin)) return res.redirect(302, '/?erro=pin_uso');
   try {
     const stored = makePinHash(f.pin);
     db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
@@ -273,7 +306,8 @@ app.post('/admin/resetar_pin', (req,res)=>{
   const nome = String((req.body||{}).nome||'').trim();
   const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
   if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
-  const pin = String(Math.floor(100000 + Math.random()*900000));
+  let pin;
+  do { pin = String(Math.floor(100000 + Math.random()*900000)); } while (pinFraco(pin) || pinEmUso(pin, u.id));
   const stored = makePinHash(pin);
   db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(stored, stored.split(':')[0], u.id);
   logAud(req.user.nome, 'pin_reset', nome);
@@ -316,6 +350,7 @@ app.post('/me/trocar_pin', (req,res)=>{
   if (fracoNovo) return res.status(400).json({ok:false, erro: fracoNovo==='formato' ? 'pin_invalido' : 'pin_fraco', msg: fracoNovo==='formato' ? 'O PIN precisa ter no minimo 6 digitos (apenas numeros).' : MSG_PIN_FRACO});
   const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
   if (!u || !checkPin(atual, u.pin_hash)) return res.status(403).json({ok:false, erro:'pin_atual_incorreto'});
+  if (pinEmUso(novo, u.id)) return res.status(409).json({ok:false, erro:'pin_em_uso', msg: MSG_PIN_EM_USO});
   const stored = makePinHash(novo);
   db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(stored, stored.split(':')[0], u.id);
   logAud(u.nome, 'pin_trocado_proprio', u.nome);
