@@ -101,6 +101,16 @@ const AUTH_COOKIE = 'painel_auth';
 function hashPin(pin, salt){ return crypto.scryptSync(String(pin), salt, 64).toString('hex'); }
 function makePinHash(pin){ const salt = crypto.randomBytes(16).toString('hex'); return salt + ':' + hashPin(pin, salt); }
 function checkPin(pin, stored){ try { const parts = String(stored).split(':'); const h = hashPin(pin, parts[0]); return !!parts[1] && crypto.timingSafeEqual(Buffer.from(h,'hex'), Buffer.from(parts[1],'hex')); } catch(e){ return false; } }
+function pinFraco(pin){
+  const p = String(pin==null?'':pin);
+  if (!/^\d{6,}$/.test(p)) return 'formato';
+  if (/^(\d)\1+$/.test(p)) return 'repetido';
+  let asc=true, desc=true;
+  for (let i=1;i<p.length;i++){ if (+p[i] !== (+p[i-1]+1)%10) asc=false; if (+p[i] !== (+p[i-1]+9)%10) desc=false; }
+  if (asc || desc) return 'sequencia';
+  return null;
+}
+const MSG_PIN_FRACO = 'PIN muito fraco: nao use numero repetido ou sequencia.';
 function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
 const usersCount = () => db.prepare('SELECT COUNT(*) c FROM users').get().c;
 function logAud(usuario, acao, sobre, detalhe){ try { db.prepare('INSERT INTO auditoria (ts, usuario, acao, sobre, detalhe) VALUES (?,?,?,?,?)').run(new Date().toISOString(), usuario==null?null:String(usuario), String(acao), sobre==null?null:String(sobre).slice(0,200), detalhe==null?null:String(detalhe).slice(0,500)); } catch(e){ console.error('auditoria:', e.message); } }
@@ -157,18 +167,18 @@ function loginPage(err, mode){
       '<p>Primeiro acesso · crie seu acesso</p>' +
       '<form method=post action=/login/criar>' +
       '<input type=text name=nome placeholder="Seu nome" autofocus required maxlength=60>' +
-      '<input type=password name=pin placeholder="PIN (6 dígitos)" required inputmode=numeric maxlength=6 style="margin-top:12px">' +
+      '<input type=password name=pin placeholder="PIN (mínimo 6 dígitos)" required inputmode=numeric maxlength=12 style="margin-top:12px">' +
       '<button>Criar meu acesso</button><div class=err>' + (err ? 'Nome já existe ou PIN inválido (6 dígitos).' : '') + '</div></form>');
   }
   return pageShell('Acesso restrito',
     '<form method=post action=/login>' +
     '<input type=text name=nome placeholder="Nome" autofocus required maxlength=60>' +
-    '<input type=password name=pin placeholder="PIN (6 dígitos)" required inputmode=numeric maxlength=6 style="margin-top:12px">' +
-    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Nome já existe ou PIN inválido (6 dígitos).' : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : (err==='bloqueado' ? 'Acesso bloqueado. Fale com o administrador.' : ''))))))) + '</div></form>' +
+    '<input type=password name=pin placeholder="PIN (mínimo 6 dígitos)" required inputmode=numeric maxlength=12 style="margin-top:12px">' +
+    '<button>Entrar</button><div class=err>' + (err==='login' ? 'Nome ou PIN incorretos.' : (err==='novo' ? 'Não foi possível criar o acesso (nome em uso ou PIN inválido).' : (err==='admin' ? 'PIN de administrador incorreto.' : (err==='pendente' ? 'Cadastro aguardando aprovação do admin.' : (err==='existe' ? 'Nome já existe ou PIN inválido (6 dígitos).' : (err==='ok' ? 'Cadastro criado! Aguarde a aprovação do admin.' : (err==='bloqueado' ? 'Acesso bloqueado. Fale com o administrador.' : (err==='fraco' ? 'PIN muito fraco: nao use numero repetido ou sequencia.' : '')))))))) + '</div></form>' +
     '<div class=alt><h2>SOU NOVO AQUI</h2>' +
     '<form method=post action=/login/novo>' +
     '<input type=text name=nome placeholder="Seu nome" required maxlength=60>' +
-    '<input type=password name=pin placeholder="PIN (6 dígitos)" required inputmode=numeric maxlength=6 style="margin-top:12px">' +
+    '<input type=password name=pin placeholder="PIN (mínimo 6 dígitos)" required inputmode=numeric maxlength=12 style="margin-top:12px">' +
     '<button>Criar acesso</button><div class=hint>Seu cadastro ficará aguardando aprovação do admin.</div></form></div>');
 }
 // Middleware: tudo exige cookie, EXCETO webhook (EVO não autentica) e login/logout
@@ -202,7 +212,7 @@ app.post('/login', (req,res)=>{
 app.post('/login/criar', (req,res)=>{
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
-  if (usersCount() > 0 || !nome || !/^\d{6}$/.test(f.pin)) return res.redirect(302, '/?erro=1&modo=criar');
+  if (usersCount() > 0 || !nome || pinFraco(f.pin)) return res.redirect(302, '/?erro=' + (pinFraco(f.pin)==='formato' ? '1' : 'fraco') + '&modo=criar');
   try {
     const stored = makePinHash(f.pin); const info = db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
     logAud(nome, 'cadastro_criado', nome, 'primeiro acesso (admin)');
@@ -213,7 +223,8 @@ app.post('/login/criar', (req,res)=>{
 app.post('/login/novo', (req,res)=>{
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
-  if (!nome || !/^\d{6}$/.test(f.pin)) return res.redirect(302, '/?erro=existe');
+  const fraco = pinFraco(f.pin);
+  if (!nome || fraco) return res.redirect(302, '/?erro=' + (fraco==='formato' ? 'existe' : 'fraco'));
   try {
     const stored = makePinHash(f.pin);
     db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
@@ -301,7 +312,8 @@ app.post('/me/trocar_pin', (req,res)=>{
   if (!requireUser(req,res)) return;
   const b = req.body || {};
   const atual = String(b.pin_atual||''), novo = String(b.pin_novo||'');
-  if (!/^\d{6}$/.test(novo)) return res.status(400).json({ok:false, erro:'pin_invalido'});
+  const fracoNovo = pinFraco(novo);
+  if (fracoNovo) return res.status(400).json({ok:false, erro: fracoNovo==='formato' ? 'pin_invalido' : 'pin_fraco', msg: fracoNovo==='formato' ? 'O PIN precisa ter no minimo 6 digitos (apenas numeros).' : MSG_PIN_FRACO});
   const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
   if (!u || !checkPin(atual, u.pin_hash)) return res.status(403).json({ok:false, erro:'pin_atual_incorreto'});
   const stored = makePinHash(novo);
@@ -684,8 +696,17 @@ body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;b
 header{border-bottom:1px solid var(--line);padding:24px 0 16px}
 .htop{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
 h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)}
-.sub{font-size:14px;color:var(--mut)}
+.sub{font-size:17px;color:var(--mut)}
 .live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut)}
+.usermenu{position:relative;display:inline-block}
+.uname{background:none;border:0;color:var(--gold2);font-size:13px;font-weight:600;cursor:pointer;padding:4px 6px;line-height:1.4;font-family:inherit}
+.umenu{position:absolute;right:0;top:100%;margin-top:4px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:180px;z-index:90;box-shadow:0 8px 24px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:2px}
+.umenu a{color:var(--txt);text-decoration:none;padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.4}
+.umenu a:hover{background:rgba(212,165,63,.12)}
+.foot{display:flex;justify-content:center;align-items:center;gap:8px;padding:28px 0 18px;color:var(--mut);font-size:11px}
+.footlbl{letter-spacing:3px;font-weight:700}
+.footmut{letter-spacing:1px}
+.foot .clock{font-size:11px}
 .dot{width:8px;height:8px;border-radius:50%;background:#39d98a}
 .clock{font-variant-numeric:tabular-nums;color:var(--mut)}
 .who{color:var(--gold2);font-size:12px;font-weight:600}
@@ -773,7 +794,8 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 .ev{padding:12px 16px;margin-bottom:8px}
 }
 </style></head><body>
-<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live><span class=dot></span>ao vivo<span class=clock id=clock>--:--:--</span><span class=who>· __USER__</span>__ADMINBADGE__<form action=/logout method=post style=display:none id=lo></form><a class=sair href="#" onclick="trocarPin();return false">🔑 Trocar meu PIN</a><a class=sair href="#" onclick="document.getElementById('lo').submit();return false">sair</a></div><nav class=tabs>__TABS__</nav></div></header>
+<header><div class=wrap><div class=htop><h1>LEGACY</h1><span class=sub>Painel de Vendas</span><div class=live>__ADMINBADGE__<form action=/logout method=post style=display:none id=lo></form><div class=usermenu><button type=button class=uname id=uname-btn>▾ __USER__</button><div class=umenu id=umenu hidden><a href="#" onclick="toggleUserMenu(false);trocarPin();return false">🔑 Trocar meu PIN</a><a href="#" onclick="document.getElementById('lo').submit();return false">🚪 Sair</a></div></div></div><nav class=tabs>__TABS__</nav></div></header>
+<footer class=foot><span class=dot></span><span class=footlbl>AO VIVO</span><span class=clock id=clock>--:--:--</span><span class=footmut>· Fortaleza</span></footer>
 <div class=wrap><div id=sec-vendas>
 <div class=kpis>
 <div class="card kpi"><div class=lbl>Faturamento hoje</div><div class=val>__FAT__</div><div class=sub>__PGD__ vendas pagas</div></div>
@@ -789,13 +811,18 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <input id=q placeholder="Buscar por nome, whatsapp ou produto…" oninput="fltr()">
 <a class=btn-csv href="/export.csv?evento=__EVENC__">Exportar CSV</a>
 </div>
+<div id=feed>__FEED__</div></div>
 <div id=sec-admin hidden>__ADMIN__</div>
 <div id=sec-auditoria hidden>__AUDIT__</div>
-<div id=feed>__FEED__</div></div>
 <div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART__</div>
 __RANK__
 </div>
 <script>
+function setTab(t){var ok=false;document.querySelectorAll('.tab').forEach(function(a){var on=a.dataset.tab===t;if(on)ok=true;a.classList.toggle('on',on)});if(!ok)t='vendas';['sec-vendas','sec-admin','sec-auditoria'].forEach(function(id){var s=document.getElementById(id);if(s)s.hidden=id!=='sec-'+t});sessionStorage.setItem('legacy_tab',t)}
+(function(){var t=sessionStorage.getItem('legacy_tab')||'vendas';setTab(document.querySelector('.tab[data-tab="'+t+'"]')?t:'vendas')})();
+function trocarPin(){var a=prompt('PIN atual:');if(!a)return;var n1=prompt('Novo PIN (mínimo 6 dígitos):');if(!n1)return;if(!/^\d{6,}$/.test(n1)){alert('O novo PIN precisa ter no mínimo 6 dígitos (apenas números).');return}var n2=prompt('Confirme o novo PIN:');if(n1!==n2){alert('Os PINs não conferem.');return}fetch('/me/trocar_pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin_atual:a,pin_novo:n1})}).then(function(r){return r.json()}).then(function(j){if(j.ok){alert('PIN alterado com sucesso!')}else{alert(j.erro==='pin_atual_incorreto'?'PIN atual incorreto.':(j.erro==='pin_fraco'?(j.msg||'PIN muito fraco: nao use numero repetido ou sequencia.'):(j.msg||j.erro||'Erro')))}}).catch(function(){alert('Erro de rede')})}
+function toggleUserMenu(force){var m=document.getElementById('umenu');if(!m)return;var open=(force===true)||(force!==false&&!m.hidden);m.hidden=open?true:false}
+(function(){var b=document.getElementById('uname-btn');if(b)b.addEventListener('click',function(e){e.stopPropagation();toggleUserMenu()});document.addEventListener('click',function(e){var m=document.getElementById('umenu');if(m&&!m.hidden&&!m.contains(e.target))toggleUserMenu(false)})})();
 function nowClock(){return new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})}
 setInterval(function(){var c=document.getElementById('clock');if(c)c.textContent=nowClock()},1000);
 (function(){var c=document.getElementById('clock');if(c)c.textContent=nowClock()})();
@@ -812,9 +839,6 @@ function admEditarNome(nome){var n=prompt('Novo nome para '+nome+':',nome);if(n&
 function admResetPin(nome){if(confirm('Resetar PIN de '+nome+'? Um novo PIN de 6 dígitos será gerado.'))adminPost('/admin/resetar_pin',{nome:nome},function(j){alert('Novo PIN de '+nome+': '+j.pin)})}
 function admBloquear(nome,bloq){adminPost('/admin/bloquear',{nome:nome,bloquear:bloq})}
 function admExcluir(nome){if(confirm('Excluir usuário '+nome+'? As ações antigas permanecem na auditoria.'))adminPost('/admin/excluir',{nome:nome})}
-function setTab(t){var ok=false;document.querySelectorAll('.tab').forEach(function(a){var on=a.dataset.tab===t;if(on)ok=true;a.classList.toggle('on',on)});if(!ok)t='vendas';['sec-vendas','sec-admin','sec-auditoria'].forEach(function(id){var s=document.getElementById(id);if(s)s.hidden=id!=='sec-'+t});sessionStorage.setItem('legacy_tab',t)}
-(function(){var t=sessionStorage.getItem('legacy_tab')||'vendas';setTab(document.querySelector('.tab[data-tab="'+t+'"]')?t:'vendas')})();
-function trocarPin(){var a=prompt('PIN atual:');if(!a)return;var n1=prompt('Novo PIN (6 dígitos):');if(!n1)return;if(!/^\d{6}$/.test(n1)){alert('O novo PIN precisa ter 6 dígitos.');return}var n2=prompt('Confirme o novo PIN:');if(n1!==n2){alert('Os PINs não conferem.');return}fetch('/me/trocar_pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin_atual:a,pin_novo:n1})}).then(function(r){return r.json()}).then(function(j){if(j.ok){alert('PIN alterado com sucesso!')}else{alert(j.erro==='pin_atual_incorreto'?'PIN atual incorreto.':(j.erro||'Erro'))}}).catch(function(){alert('Erro de rede')})}
 var drawer=document.getElementById('charts-drawer'),btnC=document.getElementById('btn-charts');
 function applyCharts(){var open=sessionStorage.getItem('legacy_charts')==='1';drawer.classList.toggle('open',open);btnC.classList.toggle('on',open);}
 btnC.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts',sessionStorage.getItem('legacy_charts')==='1'?'0':'1');applyCharts();});
@@ -955,7 +979,6 @@ app.get('/', (req,res)=>{
         + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table>';
     }
     if (!adminHtml) adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (0)</h3><div style="color:var(--mut);font-size:13px">Nenhum cadastro pendente. 🎉</div></div>';
-    else adminHtml += '<p style="margin:8px 0 0;font-size:12px;color:var(--mut)">Nenhum outro cadastro pendente.</p>';
     adminHtml += '</div>';
   }
   if (isAdmin){
