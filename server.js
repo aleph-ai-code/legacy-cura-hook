@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const app = express();
+app.set('trust proxy', 1); // atrás do Traefik: rate limit usa IP real (X-Forwarded-For)
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const DB_FILE = path.join(DATA_DIR, 'events.db');
 const LEGACY_JSON = process.env.DATA_FILE || path.join(DATA_DIR, 'events.json');
@@ -123,7 +124,8 @@ function pinEmUso(pin, excluirId){
 // Rate limit do login: 5 erros em 5 min = bloqueio de 15 min por IP
 const LOGIN_FAILS = new Map();
 const RL_JANELA = 5*60*1000, RL_MAX = 5, RL_BLOQUEIO = 15*60*1000;
-function loginBloqueado(ip){ const e = LOGIN_FAILS.get(ip); return !!(e && e.blockUntil && Date.now() < e.blockUntil); }
+function loginPrune(){ const now = Date.now(); for (const [k,e] of LOGIN_FAILS){ if ((e.blockUntil && now >= e.blockUntil) || (!e.blockUntil && now - (e.window||now) > RL_JANELA)) LOGIN_FAILS.delete(k); } }
+function loginBloqueado(ip){ loginPrune(); const e = LOGIN_FAILS.get(ip); return !!(e && e.blockUntil && Date.now() < e.blockUntil); }
 function loginRegFail(ip){
   const now = Date.now();
   const e = LOGIN_FAILS.get(ip) || { count: 0, window: now };
@@ -214,7 +216,7 @@ app.use((req,res,next)=>{
   res.status(200).setHeader('Content-Type','text/html; charset=utf-8');
   return res.send(loginPage(errMap[req.query && req.query.erro] || '', req.query && req.query.modo === 'criar' ? 'criar' : undefined));
 });
-function setAuthCookie(res, user){ res.setHeader('Set-Cookie', AUTH_COOKIE + '=' + makeToken(user) + '; Max-Age=2592000; HttpOnly; Path=/'); }
+function setAuthCookie(res, user){ res.setHeader('Set-Cookie', AUTH_COOKIE + '=' + makeToken(user) + '; Max-Age=2592000; HttpOnly; Path=/; SameSite=Lax; Secure'); }
 function formFields(req){
   const raw = typeof req.body === 'string' ? req.body : (req.body && typeof req.body === 'object' ? req.body : {});
   if (typeof raw === 'string'){ try { const p = new URLSearchParams(raw); return { nome: p.get('nome')||'', pin: p.get('pin')||'', pin_admin: p.get('pin_admin')||'' }; } catch(e){ return { nome:'', pin:'', pin_admin:'' }; } }
@@ -240,27 +242,39 @@ app.post('/login', (req,res)=>{
   logAud(null, 'login_falho', ip, 'PIN nao encontrado');
   return res.redirect(302, '/?erro=1');
 });
+function rlGuard(req,res){ if (loginBloqueado(req.ip || (req.socket && req.socket.remoteAddress) || '?')){ res.redirect(302, '/?erro=ratelimit'); return false; } return true; }
 app.post('/login/criar', (req,res)=>{
+  if (!rlGuard(req,res)) return;
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
-  if (usersCount() > 0 || !nome || pinFraco(f.pin)) return res.redirect(302, '/?erro=' + (pinFraco(f.pin)==='formato' ? '1' : 'fraco') + '&modo=criar');
-  if (pinEmUso(f.pin)) return res.redirect(302, '/?erro=pin_uso&modo=criar');
+  if (usersCount() > 0 || !nome || pinFraco(f.pin)){ loginRegFail(req.ip || '?'); return res.redirect(302, '/?erro=' + (pinFraco(f.pin)==='formato' ? '1' : 'fraco') + '&modo=criar'); }
+  loginRegOk(req.ip || '?');
   try {
-    const stored = makePinHash(f.pin); const info = db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
+    const stored = makePinHash(f.pin);
+    const info = db.transaction(() => {
+      if (pinEmUso(f.pin)) return null;
+      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
+    }).immediate();
+    if (!info) return res.redirect(302, '/?erro=pin_uso&modo=criar');
     logAud(nome, 'cadastro_criado', nome, 'primeiro acesso (admin)');
     setAuthCookie(res, { id: info.lastInsertRowid, nome });
     return res.redirect(302, '/');
   } catch(e){ return res.redirect(302, '/?erro=1&modo=criar'); }
 });
 app.post('/login/novo', (req,res)=>{
+  if (!rlGuard(req,res)) return;
   const f = formFields(req);
   const nome = String(f.nome||'').trim();
   const fraco = pinFraco(f.pin);
-  if (!nome || fraco) return res.redirect(302, '/?erro=' + (fraco==='formato' ? 'existe' : 'fraco'));
-  if (pinEmUso(f.pin)) return res.redirect(302, '/?erro=pin_uso');
+  if (!nome || fraco){ loginRegFail(req.ip || '?'); return res.redirect(302, '/?erro=' + (fraco==='formato' ? 'existe' : 'fraco')); }
+  loginRegOk(req.ip || '?');
   try {
     const stored = makePinHash(f.pin);
-    db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
+    const info = db.transaction(() => {
+      if (pinEmUso(f.pin)) return null;
+      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
+    }).immediate();
+    if (!info) return res.redirect(302, '/?erro=pin_uso');
     logAud(nome, 'cadastro_criado', nome, 'aguardando aprovacao');
     return res.redirect(302, '/?erro=ok');
   } catch(e){ return res.redirect(302, '/?erro=existe'); }
@@ -307,7 +321,7 @@ app.post('/admin/resetar_pin', (req,res)=>{
   const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
   if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
   let pin;
-  do { pin = String(Math.floor(100000 + Math.random()*900000)); } while (pinFraco(pin) || pinEmUso(pin, u.id));
+  do { pin = String(crypto.randomInt(100000, 1000000)); } while (pinFraco(pin) || pinEmUso(pin, u.id));
   const stored = makePinHash(pin);
   db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(stored, stored.split(':')[0], u.id);
   logAud(req.user.nome, 'pin_reset', nome);
@@ -385,7 +399,7 @@ app.get('/auditoria.csv', (req,res)=>{
   res.send('\ufeff' + lines.join('\r\n'));
 });
 app.post('/logout', (req,res)=>{
-  res.setHeader('Set-Cookie', AUTH_COOKIE + '=; Max-Age=0; HttpOnly; Path=/');
+  res.setHeader('Set-Cookie', AUTH_COOKIE + '=; Max-Age=0; HttpOnly; Path=/; SameSite=Lax; Secure');
   return res.redirect(302, '/');
 });
 
