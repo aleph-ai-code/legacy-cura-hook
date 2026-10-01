@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   nome TEXT UNIQUE NOT NULL,
   pin_hash TEXT NOT NULL,
+  salt TEXT NOT NULL DEFAULT '',
   criado_em TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS acoes (
@@ -43,6 +44,8 @@ CREATE TABLE IF NOT EXISTS acoes (
 CREATE INDEX IF NOT EXISTS idx_acoes_event ON acoes(event_id, acao);
 `);
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
+// Migracao: bancos antigos podem nao ter a coluna salt em users
+try { db.exec("ALTER TABLE users ADD COLUMN salt TEXT NOT NULL DEFAULT ''"); } catch(e) {}
 
 // Dedup: chave = webhook_evento + ':' + (venda.id ?? venda.uid ?? hash do body)
 function dedupKey(body){
@@ -83,7 +86,19 @@ const PAINEL_PASSWORD = process.env.PAINEL_PASSWORD || 'L3g@cy'; // PIN-admin pa
 const AUTH_SECRET = process.env.PAINEL_SECRET || 'legacy-painel-secret-v1';
 const USER_COOKIE = 'painel_user';
 function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
-function pinHash(nome, pin){ return crypto.createHash('sha256').update(String(nome).toLowerCase().trim() + '|' + String(pin) + '|' + AUTH_SECRET).digest('hex'); }
+function novoSalt(){ return crypto.randomBytes(16).toString('hex'); }
+function pinHashScrypt(pin, salt){ return crypto.scryptSync(String(pin), String(salt), 64).toString('hex'); }
+function pinHashLegacy(nome, pin){ return crypto.createHash('sha256').update(String(nome).toLowerCase().trim() + '|' + String(pin) + '|' + AUTH_SECRET).digest('hex'); }
+function pinOk(u, nome, pin){
+  const hash = String(u && u.pin_hash || '');
+  const salt = String(u && u.salt || '');
+  if (!salt) return safeEq(pinHashLegacy(nome, pin), hash); // legado: sem salt por usuario
+  return safeEq(pinHashScrypt(pin, salt), hash);
+}
+function inserirUsuario(nome, pin){
+  const salt = novoSalt();
+  return db.prepare('INSERT INTO users (nome, pin_hash, salt, criado_em) VALUES (?,?,?,?)').run(nome, pinHashScrypt(pin, salt), salt, new Date().toISOString());
+}
 function userCount(){ return db.prepare('SELECT COUNT(*) c FROM users').get().c; }
 function userByNome(nome){ try { return db.prepare('SELECT * FROM users WHERE nome = ?').get(String(nome||'').trim()); } catch(e){ return null; } }
 function userById(id){ try { return db.prepare('SELECT * FROM users WHERE id = ?').get(Number(id)); } catch(e){ return null; } }
@@ -194,7 +209,7 @@ app.post('/login', (req,res)=>{
   if (acao === 'criar'){
     if (userCount() !== 0) return go('/');
     if (userByNome(nome)) return go('/?erro=1');
-    db.prepare('INSERT INTO users (nome, pin_hash, criado_em) VALUES (?,?,?)').run(nome, pinHash(nome, pin), new Date().toISOString());
+    inserirUsuario(nome, pin);
     const u = userByNome(nome);
     setSession(res, { id: u.id, nome: u.nome });
     return go('/');
@@ -202,13 +217,13 @@ app.post('/login', (req,res)=>{
   if (acao === 'cadastro'){
     if (!safeEq(String(f.pin_admin || ''), PAINEL_PASSWORD)) return go('/?cadastro=1&erro=1');
     if (userByNome(nome)) return go('/?cadastro=1&erro=1');
-    db.prepare('INSERT INTO users (nome, pin_hash, criado_em) VALUES (?,?,?)').run(nome, pinHash(nome, pin), new Date().toISOString());
+    inserirUsuario(nome, pin);
     const u = userByNome(nome);
     setSession(res, { id: u.id, nome: u.nome });
     return go('/');
   }
   const u = userByNome(nome);
-  if (u && safeEq(pinHash(nome, pin), u.pin_hash)){ setSession(res, { id: u.id, nome: u.nome }); return go('/'); }
+  if (u && pinOk(u, nome, pin)){ setSession(res, { id: u.id, nome: u.nome }); return go('/'); }
   return go('/?erro=1');
 });
 app.post('/logout', (req,res)=>{ clearSession(res); return res.redirect(302, '/'); });
