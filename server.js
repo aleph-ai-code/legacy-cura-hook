@@ -409,6 +409,7 @@ app.post('/hook/:origem', (req,res)=>{
   if (typeof body === 'string'){ try{ body = JSON.parse(body); }catch(e){} }
   const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
   const origem = req.params.origem;
+  if (origem === 'healthcheck') return res.status(200).json({ok:true});
   const ts = new Date().toISOString();
   const ev = body && body.webhook_evento || 'outro';
   const vid = body && body.venda && (body.venda.id ?? body.venda.uid);
