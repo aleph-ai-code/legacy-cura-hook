@@ -1025,10 +1025,9 @@ app.get('/', (req,res)=>{
           + '<button class="btn" style="margin:0;background:#b04a4a;color:#fff" onclick="doAdmin(&#39;rejeitar&#39;,&#39;' + esc(p.nome) + '&#39;)">Rejeitar</button></td></tr>';
       }
       adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (' + pend.length + ')</h3>'
-        + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table>';
+        + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table></div>';
     }
     if (!adminHtml) adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (0)</h3><div style="color:var(--mut);font-size:13px">Nenhum cadastro pendente. 🎉</div></div>';
-    adminHtml += '</div>';
   }
   if (isAdmin){
     adminHtml += usersCardHtml(req);
