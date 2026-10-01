@@ -160,6 +160,7 @@ function localDay(ts){ try { return dayFmt.format(new Date(ts)); } catch(e){ ret
 function localHour(ts){ try { return Number(hourFmt.format(new Date(ts))); } catch(e){ return new Date(ts).getHours(); } }
 function fmtDT(ts){ try { return new Date(ts).toLocaleString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
 function fmtTime(ts){ try { return new Date(ts).toLocaleTimeString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
+function fmtCardDT(ts){ try { const t=new Date(ts); const day=localDay(t), today=localDay(Date.now()), yest=localDay(Date.now()-86400000); const hora=fmtTime(t).slice(0,5); if(day===today) return 'hoje às '+hora; if(day===yest) return 'ontem às '+hora; return day.split('-').reverse().slice(0,2).join('/')+' às '+hora; } catch(e){ return fmtDT(ts); } }
 
 // ===================== BACKUP DIARIO =====================
 function doBackup(){
@@ -270,6 +271,16 @@ h1{margin:0;font-size:28px;font-weight:800;letter-spacing:5px;color:var(--gold2)
 .b-gray{background:rgba(255,255,255,.05);color:var(--mut);border:1px solid rgba(255,255,255,.1)}
 .hl{margin-top:8px;font-size:16px;font-weight:600;color:var(--gold2)}
 .btn{display:inline-block;margin-top:8px;background:var(--gold);color:#1a1033;font-weight:600;padding:8px 16px;border-radius:8px;text-decoration:none;font-size:13px}
+.chartbar{display:flex;padding:12px 0 0}
+.btn-charts{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:13px;cursor:pointer;background:transparent;line-height:1.4}
+.btn-charts:hover{background:rgba(212,165,63,.1)}
+.btn-charts.on{background:var(--gold);color:#1a1033;font-weight:600;border-color:var(--gold)}
+.charts{position:fixed;top:64px;left:50%;transform:translateX(-50%);width:min(1060px,94vw);max-height:78vh;overflow:auto;z-index:60;display:none;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:16px 20px;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+.charts.open{display:grid;gap:16px}
+.charts-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 4px}
+.charts-head h3{margin:0;font-size:16px;color:var(--gold2)}
+.btn-close{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--gold);color:#1a1033;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;line-height:1.4}
+@media(max-width:640px){.charts.open{inset:0;top:0;left:0;transform:none;width:100%;max-height:100%;border-radius:0;padding:12px 16px}}
 .btn:hover{filter:brightness(1.08)}
 details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#cfd8c6;background:#122019;border-radius:8px;padding:12px}
 .empty{color:var(--mut);text-align:center;padding:40px 0;font-size:14px}
@@ -292,19 +303,29 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}pr
 <div class="card kpi"><div class=lbl>Carrinhos abandonados hoje</div><div class=val>__CRD__</div><div class=sub>__CRT__ no total</div></div>
 <div class="card kpi"><div class=lbl>Eventos hoje</div><div class=val>__TTD__</div><div class=sub>__TOT__ no total</div></div>
 </div>
+<div class=chartbar><a id=btn-charts class=btn-charts href=#>📈 Gráficos · __CHARTMINI__</a></div>
 <div class=bar>
 <div class=filters><a href="/?evento=todos" class="__C0__">Todos</a><a href="/?evento=venda.paga" class="__C1__">Pagas</a><a href="/?evento=carrinho.abandonado" class="__C2__">Abandonados</a></div>
 <input id=q placeholder="Buscar por nome, whatsapp ou produto…" oninput="fltr()">
 <a class=btn-csv href="/export.csv?evento=__EVENC__">Exportar CSV</a>
 </div>
-<div class=charts id=chart-holder>__CHART__</div>
 <div id=feed>__FEED__</div>
+<div class=charts id=charts-drawer><div class=charts-head><h3>📈 Gráficos</h3><a id=charts-close class=btn-close href=#>✕ Fechar</a></div>__CHART__</div>
 </div>
 <script>
-setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})},1000);document.getElementById('clock').textContent=new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})}
+function nowClock(){return new Date().toLocaleTimeString('pt-BR',{timeZone:'America/Fortaleza'})}
+setInterval(function(){var c=document.getElementById('clock');if(c)c.textContent=nowClock()},1000);
+(function(){var c=document.getElementById('clock');if(c)c.textContent=nowClock()})();
 const qi=document.getElementById('q');qi.value=sessionStorage.getItem('legacy_q')||'';
 function fltr(){const q=qi.value.toLowerCase();sessionStorage.setItem('legacy_q',q);document.querySelectorAll('.ev').forEach(el=>{el.style.display=el.dataset.s.includes(q)?'':'none'})}
 fltr();
+(function(){
+var drawer=document.getElementById('charts-drawer'),btnC=document.getElementById('btn-charts');
+function applyCharts(){var open=sessionStorage.getItem('legacy_charts')==='1';drawer.classList.toggle('open',open);btnC.classList.toggle('on',open);}
+btnC.addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts',sessionStorage.getItem('legacy_charts')==='1'?'0':'1');applyCharts();});
+document.getElementById('charts-close').addEventListener('click',function(e){e.preventDefault();sessionStorage.setItem('legacy_charts','0');applyCharts();});
+applyCharts();
+})();
 setTimeout(()=>{location.href=location.pathname+(location.search||'')},15000);
 </script></body></html>`;
 
@@ -330,7 +351,7 @@ app.get('/', (req,res)=>{
   const card = (e)=>{
     const b = e.body || {};
     if (!b.webhook_evento){
-      return '<div class=ev data-s="'+esc(JSON.stringify(b).toLowerCase())+'"><div class=meta>#'+esc(e.id)+' · <b>'+esc(e.origem)+'</b> · '+fmtDT(e.ts)+'</div><details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
+      return '<div class=ev data-s="'+esc(JSON.stringify(b).toLowerCase())+'"><div class=meta>#'+esc(e.id)+' · <b>'+esc(e.origem)+'</b> · '+fmtCardDT(e.ts)+'</div><details><summary>payload</summary><pre>'+esc(JSON.stringify(b,null,2))+'</pre></details></div>';
     }
     const cli = b.cliente || {}, prod = b.produto || {}, venda = b.venda || {}, c = b.carrinho || {};
     const hora = fmtTime(e.ts);
@@ -351,7 +372,7 @@ app.get('/', (req,res)=>{
       if (c.link_recuperacao) extra += '<a class=btn href="'+esc(c.link_recuperacao)+'" target=_blank rel=noopener>🔗 Recuperar</a>';
     }
     const searchable = JSON.stringify([cli.nome,cli.whatsapp,prod.nome]).toLowerCase();
-    return '<div class=ev data-s="'+esc(searchable)+'"><div class=meta>#'+esc(e.id)+' · 🕒 '+hora+'</div>'
+    return '<div class=ev data-s="'+esc(searchable)+'"><div class=meta>#'+esc(e.id)+' · 🕒 <span title="'+esc(fmtDT(e.ts))+'">'+fmtCardDT(e.ts)+'</span></div>'
       + '<div class=fields>'+badge
       + (cli.nome?' <span class="f who">👤 '+esc(cli.nome)+'</span>':'')
       + (cli.whatsapp?' <span class=f>'+waLink+'</span>':'')
@@ -370,6 +391,7 @@ app.get('/', (req,res)=>{
     .replace('__TOT__', stats.total).replace('__TTD__', stats.totalDia)
     .replace('__C0__', cls('todos')).replace('__C1__', cls('venda.paga')).replace('__C2__', cls('carrinho.abandonado'))
     .replace('__EVENC__', encodeURIComponent(filtro))
+    .replace('__CHARTMINI__', stats.pagasDia + (stats.pagasDia===1 ? ' venda hoje' : ' vendas hoje'))
     .replace('__CHART__', salesChart())
     .replace('__FEED__', feed);
   res.setHeader('Content-Type','text/html; charset=utf-8');
