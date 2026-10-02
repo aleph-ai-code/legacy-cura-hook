@@ -7,6 +7,7 @@ const { DEFAULT_TENANT } = require('./util');
 const tenantOf = (req) => (req.user && req.user.tenant_id) || DEFAULT_TENANT;
 const { usersCardHtml, pendentesHtml } = require('./admin');
 const { tenantsCardHtml } = require('./tenants');
+const { metricasCardHtml } = require('./metricas');
 const { isMaster } = require('./util');
 const { auditResumoHtml, auditTableHtml } = require('./auditoria');
 const { exigePlanoAtivo, temRecurso, financeiroCardHtml } = require('./billing');
@@ -280,7 +281,7 @@ router.get('/', (req,res)=>{
       adminBadge = ' <a href="#" class="badge b-orange" style="text-decoration:none;margin-left:8px" onclick="setTab(&#39;admin&#39;);return false">⏳ ' + totN + ' aprovaç' + (totN===1?'ão':'ões') + ' pendente' + (totN===1?'':'s') + '</a>';
     }
     adminHtml = pendentesHtml(req);
-    if (isMaster(req.user)) adminHtml = tenantsCardHtml(req) + financeiroCardHtml(req) + adminHtml;
+    if (isMaster(req.user)) adminHtml = tenantsCardHtml(req) + metricasCardHtml(req) + financeiroCardHtml(req) + adminHtml;
     adminHtml += usersCardHtml(req);
     const auditRows = db.prepare('SELECT * FROM auditoria WHERE tenant_id=? ORDER BY id DESC LIMIT 100').all(tenantOf(req));
     auditHtml = '<div class=card style="margin:16px 0"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><h3 style="margin:0;font-size:16px;color:var(--gold2)">📜 Auditoria</h3><a class=btn-csv href="/auditoria">Abrir página completa (filtros + CSV)</a></div>' + auditResumoHtml() + auditTableHtml(auditRows) + '</div>';
