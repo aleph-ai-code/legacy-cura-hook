@@ -6,9 +6,9 @@ const Database = require('better-sqlite3');
 const app = express();
 const { DATA_DIR, DB_FILE, LEGACY_JSON, BACKUP_DIR, AUTH_SECRET, AUTH_COOKIE, TZ } = require('./src/config');
 const { db, insStmt, dedupKey, allRows, rowToEvent, doBackup } = require('./src/db');
+const { esc, logAud, adminCountExcept, requireAdmin, requireUser, csvField, CHECKS, acoesForKeys, lastOf, onboardingInfo, localDay, localHour, fmtDT, fmtTime, fmtHHMM, fmtCardDT, chartCard, startOfToday, fmtBRL } = require('./src/util');
 app.set('trust proxy', 1); // atrás do Traefik: rate limit usa IP real (X-Forwarded-For)
 
-function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 app.use(express.json({limit:'2mb'}));
 app.use(express.text({type:'*/*', limit:'2mb'}));
 
@@ -51,8 +51,6 @@ function loginRegFail(ip){
 function loginRegOk(ip){ LOGIN_FAILS.delete(ip); }
 function safeEq(a,b){ const A=Buffer.from(String(a==null?'':a)), B=Buffer.from(String(b==null?'':b)); return A.length===B.length && crypto.timingSafeEqual(A,B); }
 const usersCount = () => db.prepare('SELECT COUNT(*) c FROM users').get().c;
-function logAud(usuario, acao, sobre, detalhe){ try { db.prepare('INSERT INTO auditoria (ts, usuario, acao, sobre, detalhe) VALUES (?,?,?,?,?)').run(new Date().toISOString(), usuario==null?null:String(usuario), String(acao), sobre==null?null:String(sobre).slice(0,200), detalhe==null?null:String(detalhe).slice(0,500)); } catch(e){ console.error('auditoria:', e.message); } }
-function adminCountExcept(nome){ return db.prepare("SELECT COUNT(*) c FROM users WHERE role='admin' AND nome != ?").get(nome).c; }
 
 function sign(payload){ return crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex'); }
 function makeToken(user){
@@ -195,7 +193,6 @@ app.post('/login/novo', (req,res)=>{
 });
 
 // ===================== ADMIN: aprovacao de cadastros =====================
-function requireAdmin(req,res){ if (!req.user || req.user.role !== 'admin'){ res.status(403).json({ok:false, erro:'restrito_admin'}); return false; } return true; }
 const pendentesCount = () => db.prepare("SELECT COUNT(*) c FROM users WHERE status='pendente'").get().c;
 app.post('/admin/aprovar', (req,res)=>{
   if (!requireAdmin(req,res)) return;
@@ -334,7 +331,6 @@ app.post('/hook/:origem', (req,res)=>{
 
 // ===================== API DE ACOES (modo operacao) =====================
 const ACAO_VALIDA = new Set(['check_boasvindas','check_removido_vip','check_onboarding_ok','claim_carrinho','resultado_conquistou','resultado_nao','nota']);
-function requireUser(req,res){ if (!req.user){ res.status(401).json({ok:false, erro:'nao_autenticado'}); return false; } return true; }
 app.post('/api/acao', (req,res)=>{
   if (!requireUser(req,res)) return;
   const b = req.body || {};
@@ -374,28 +370,6 @@ app.post('/api/acao/toggle', (req,res)=>{
   return res.json({ok:true, marcado:true});
 });
 
-// Export CSV
-function csvField(v){
-  let sv = v==null ? '' : String(v);
-  if (/[",\n\r]/.test(sv)) sv = '"' + sv.replace(/"/g,'""') + '"';
-  return sv;
-}
-// Helpers de acoes por evento/venda
-const CHECKS = ['check_boasvindas','check_removido_vip','check_onboarding_ok'];
-function acoesForKeys(keys){
-  const out = {};
-  const stmt = db.prepare('SELECT * FROM acoes WHERE event_id=? ORDER BY id ASC');
-  for (const k of keys){ if (k) out[k] = stmt.all(String(k)); }
-  return out;
-}
-function lastOf(list, acao){ for (let i=list.length-1;i>=0;i--) if (list[i].acao===acao) return list[i]; return null; }
-function onboardingInfo(list){
-  const done = [];
-  for (const c of CHECKS){ const a = lastOf(list, c); if (a) done.push(a); }
-  const n = done.length;
-  const status = n===0 ? '🟡 Pendente' : (n===3 ? '✅ Completo' : '🔵 Em processo');
-  return { n, status, done };
-}
 app.get('/export.csv', (req,res)=>{
   const filtro = req.query.evento || 'todos';
   let a = allRows().map(rowToEvent);
@@ -470,14 +444,6 @@ function auditoriaPage(rows, usuarios, tipos, fUsuario, fTipo){
 }
 
 // ===================== TIMEZONE (exibicao em America/Fortaleza) =====================
-const dayFmt = new Intl.DateTimeFormat('en-CA', {timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit'}); // YYYY-MM-DD
-const hourFmt = new Intl.DateTimeFormat('en-GB', {timeZone: TZ, hour:'numeric', hour12:false});
-function localDay(ts){ try { return dayFmt.format(new Date(ts)); } catch(e){ return String(ts).slice(0,10); } }
-function localHour(ts){ try { return Number(hourFmt.format(new Date(ts))); } catch(e){ return new Date(ts).getHours(); } }
-function fmtDT(ts){ try { return new Date(ts).toLocaleString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
-function fmtTime(ts){ try { return new Date(ts).toLocaleTimeString('pt-BR',{timeZone:TZ}); } catch(e){ return String(ts); } }
-function fmtHHMM(ts){ try { return fmtTime(ts).slice(0,5); } catch(e){ return String(ts); } }
-function fmtCardDT(ts){ try { const t=new Date(ts); const day=localDay(t), today=localDay(Date.now()), yest=localDay(Date.now()-86400000); const hora=fmtTime(t).slice(0,5); if(day===today) return 'hoje às '+hora; if(day===yest) return 'ontem às '+hora; return day.split('-').reverse().slice(0,2).join('/')+' às '+hora; } catch(e){ return fmtDT(ts); } }
 
 app.get('/backup', (req,res)=>{
   const f = doBackup();
@@ -486,9 +452,6 @@ app.get('/backup', (req,res)=>{
 });
 
 // ===================== GRAFICO SVG (vendas pagas) =====================
-function chartCard(title, inner){
-  return '<div class="card chart-card"><h3>' + title + '</h3>' + inner + '</div>';
-}
 function salesChart(){
   const rows = db.prepare("SELECT ts FROM events WHERE evento='venda.paga'").all();
   const byDay = {}, byHour = {};
@@ -632,11 +595,6 @@ function usersCardHtml(req){
   return '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Usuários (' + usersAll.length + ')</h3><table class=recov><tr><th>Nome</th><th>Status</th><th>Papel</th><th></th></tr>' + urows + '</table><p style="margin:12px 0 0"><a class=btn-csv href="/auditoria">📜 Auditoria</a></p></div>';
 }
 
-function startOfToday(){ return Date.parse(localDay(Date.now()) + 'T00:00:00-03:00'); } // meia-noite America/Fortaleza (UTC-3, sem DST)
-function fmtBRL(centavos, moeda){
-  const cur = moeda || 'BRL';
-  try { return (centavos/100).toLocaleString('pt-BR',{style:'currency',currency:cur}); } catch(e){ return 'R$ ' + (centavos/100).toFixed(2); }
-}
 
 // ===================== PAINEL LEGACY (design pass: grid, ritmo, hierarquia) =====================
 const PAGE = `<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Painel de Vendas</title><meta name=viewport content="width=device-width,initial-scale=1"><style>
