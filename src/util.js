@@ -15,7 +15,9 @@ const { db } = require('./db');
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function logAud(usuario, acao, sobre, detalhe, tenantId){ try { db.prepare('INSERT INTO auditoria (ts, usuario, acao, sobre, detalhe, tenant_id) VALUES (?,?,?,?,?,?)').run(new Date().toISOString(), usuario==null?null:String(usuario), String(acao), sobre==null?null:String(sobre).slice(0,200), detalhe==null?null:String(detalhe).slice(0,500), tenantId || DEFAULT_TENANT); } catch(e){ console.error('auditoria:', e.message); } }
 function adminCountExcept(nome, tenantId){ return db.prepare("SELECT COUNT(*) c FROM users WHERE role='admin' AND nome != ? AND tenant_id = ?").get(nome, tenantId || DEFAULT_TENANT).c; }
-function requireAdmin(req,res){ if (!req.user || req.user.role !== 'admin'){ res.status(403).json({ok:false, erro:'restrito_admin'}); return false; } return true; }
+function isMaster(u){ return !!u && u.role === 'master'; }
+function requireAdmin(req,res){ if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'master')){ res.status(403).json({ok:false, erro:'restrito_admin'}); return false; } return true; }
+function requireMaster(req,res){ if (!isMaster(req.user)){ res.status(403).json({ok:false, erro:'restrito_master'}); return false; } return true; }
 function requireUser(req,res){ if (!req.user){ res.status(401).json({ok:false, erro:'nao_autenticado'}); return false; } return true; }
 // Export CSV
 function csvField(v){
@@ -56,4 +58,4 @@ function fmtBRL(centavos, moeda){
   try { return (centavos/100).toLocaleString('pt-BR',{style:'currency',currency:cur}); } catch(e){ return 'R$ ' + (centavos/100).toFixed(2); }
 }
 
-module.exports = { esc, uuidv7, DEFAULT_TENANT, logAud, adminCountExcept, requireAdmin, requireUser, csvField, CHECKS, acoesForKeys, lastOf, onboardingInfo, localDay, localHour, fmtDT, fmtTime, fmtHHMM, fmtCardDT, chartCard, startOfToday, fmtBRL };
+module.exports = { esc, uuidv7, DEFAULT_TENANT, logAud, adminCountExcept, requireAdmin, requireMaster, isMaster, requireUser, csvField, CHECKS, acoesForKeys, lastOf, onboardingInfo, localDay, localHour, fmtDT, fmtTime, fmtHHMM, fmtCardDT, chartCard, startOfToday, fmtBRL };
