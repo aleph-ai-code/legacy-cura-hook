@@ -96,8 +96,7 @@ app.use(express.json({limit:'2mb'}));
 app.use(express.text({type:'*/*', limit:'2mb'}));
 
 // ===================== USUARIOS + LOGIN (nome + PIN) =====================
-const PAINEL_PASSWORD = process.env.PAINEL_PASSWORD || 'L3g@cy';
-const AUTH_SECRET = process.env.PAINEL_SECRET || 'legacy-painel-secret-v1';
+const AUTH_SECRET = process.env.PAINEL_SECRET || (console.warn('[seguranca] PAINEL_SECRET nao definido: gerando segredo aleatorio por boot (sessoes/cookies serao invalidados a cada restart). Defina PAINEL_SECRET no .env.'), crypto.randomBytes(32).toString('hex'));
 const AUTH_COOKIE = 'painel_auth';
 function hashPin(pin, salt){ return crypto.scryptSync(String(pin), salt, 64).toString('hex'); }
 function makePinHash(pin){ const salt = crypto.randomBytes(16).toString('hex'); return salt + ':' + hashPin(pin, salt); }
