@@ -96,7 +96,7 @@ router.post('/login', (req,res)=>{
   if (match && match.status === 'pendente') return res.redirect(302, '/?erro=pendente');
   if (match && match.status === 'bloqueado'){ logAud(match.nome, 'login_bloqueado', match.nome); return res.redirect(302, '/?erro=bloqueado'); }
   if (match && tenantBloqueado(match)){ logAud(match.nome, 'login_bloqueado', match.nome, 'tenant inativo'); return res.redirect(302, '/?erro=bloqueado'); }
-  if (match && match.status === 'ativo'){ loginRegOk(ip); logAud(match.nome, 'login_ok', match.nome); setAuthCookie(res, match); return res.redirect(302, '/'); }
+  if (match && match.status === 'ativo'){ loginRegOk(ip); logAud(match.nome, 'login_ok', match.nome, null, match.tenant_id); setAuthCookie(res, match); return res.redirect(302, '/'); }
   loginRegFail(ip);
   logAud(null, 'login_falho', ip, 'PIN nao encontrado');
   return res.redirect(302, '/?erro=1');

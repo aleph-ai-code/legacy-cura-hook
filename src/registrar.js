@@ -4,6 +4,19 @@ const { db } = require('./db');
 const { esc, logAud, DEFAULT_TENANT } = require('./util');
 const { makePinHash, pinFraco, pinEmUso } = require('./auth');
 const { subValido, subLivre, criarTenant } = require('./tenants');
+// Fase 4: rate limit do cadastro (mesmo padrao do login): 5 POSTs/hora por IP = bloqueio 1h
+const REG_FAILS = new Map();
+const REG_JANELA = 60*60*1000, REG_MAX = 5, REG_BLOQUEIO = 60*60*1000;
+function regPrune(){ const now = Date.now(); for (const [k,e] of REG_FAILS){ if ((e.blockUntil && now >= e.blockUntil) || (!e.blockUntil && now - (e.window||now) > REG_JANELA)) REG_FAILS.delete(k); } }
+function regBloqueado(ip){ regPrune(); const e = REG_FAILS.get(ip); return !!(e && e.blockUntil && Date.now() < e.blockUntil); }
+function regConta(ip){
+  const now = Date.now();
+  const e = REG_FAILS.get(ip) || { count: 0, window: now };
+  if (now - e.window > REG_JANELA){ e.window = now; e.count = 0; }
+  e.count++;
+  if (e.count >= REG_MAX) e.blockUntil = now + REG_BLOQUEIO;
+  REG_FAILS.set(ip, e);
+}
 // ===================== CADASTRO SELF-SERVICE DE TENANT =====================
 // Empresa cria conta: nome da empresa + subdominio + nome do admin + PIN forte.
 // Tenant nasce 'pendente' e admin do tenant 'pendente' — so o master aprova.
@@ -27,6 +40,7 @@ function registrarPage(err){
     sub_uso: 'Este subdomínio já está em uso.',
     nome_uso: 'Este nome de admin já está em uso.',
     pin_uso: 'Este PIN já está em uso, escolha outro.',
+    ratelimit: 'Muitas tentativas de cadastro deste IP. Tente novamente em 1 hora.',
     pin_fraco: 'PIN muito fraco: não use número repetido ou sequência (mínimo 6 dígitos).',
     ok: 'Cadastro enviado! A empresa será ativada após aprovação do administrador.'
   };
@@ -46,6 +60,9 @@ router.get('/registrar', (req,res)=>{
   res.send(registrarPage(String(req.query.erro||'')));
 });
 router.post('/registrar', (req,res)=>{
+  const ip = req.ip || (req.socket && req.socket.remoteAddress) || '?';
+  if (regBloqueado(ip)) return res.redirect(302, '/registrar?erro=ratelimit');
+  regConta(ip);
   let raw = typeof req.body === 'string' ? req.body : (req.body||{});
   let f = raw;
   if (typeof raw === 'string'){ try { const p = new URLSearchParams(raw); f = { empresa:p.get('empresa'), subdominio:p.get('subdominio'), nome:p.get('nome'), pin:p.get('pin') }; } catch(e){ f = {}; } }
