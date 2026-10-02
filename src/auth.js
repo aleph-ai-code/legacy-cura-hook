@@ -4,6 +4,9 @@ const crypto = require('crypto');
 const { AUTH_SECRET, AUTH_COOKIE } = require('./config');
 const { db } = require('./db');
 const { logAud, DEFAULT_TENANT } = require('./util');
+// Tenant suspenso/pendente bloqueia login e sessao (Fase 2)
+function tenantDoUsuario(tenantId){ try { return db.prepare('SELECT status FROM tenants WHERE id=?').get(tenantId || DEFAULT_TENANT); } catch(e){ return null; } }
+function tenantBloqueado(user){ const t = tenantDoUsuario(user && user.tenant_id); return !!t && t.status !== 'ativo'; }
 // ===================== USUARIOS + LOGIN (nome + PIN) =====================
 function hashPin(pin, salt){ return crypto.scryptSync(String(pin), salt, 64).toString('hex'); }
 function makePinHash(pin){ const salt = crypto.randomBytes(16).toString('hex'); return salt + ':' + hashPin(pin, salt); }
@@ -59,7 +62,10 @@ function parseToken(tok){
     const d = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (!d.exp || d.exp < Date.now()) return null;
   const u = db.prepare('SELECT id, nome, status, role, tenant_id FROM users WHERE id=?').get(d.id);
-  return (u && u.nome === d.nome && u.status === 'ativo') ? u : null;
+  if (!(u && u.nome === d.nome && u.status === 'ativo')) return null;
+  const t = tenantDoUsuario(u.tenant_id);
+  if (t && t.status !== 'ativo') return null; // tenant suspenso/pendente: sessao invalida
+  return u;
   } catch(e){ return null; }
 }
 function getAuth(req){
@@ -88,6 +94,7 @@ router.post('/login', (req,res)=>{
   }
   if (match && match.status === 'pendente') return res.redirect(302, '/?erro=pendente');
   if (match && match.status === 'bloqueado'){ logAud(match.nome, 'login_bloqueado', match.nome); return res.redirect(302, '/?erro=bloqueado'); }
+  if (match && tenantBloqueado(match)){ logAud(match.nome, 'login_bloqueado', match.nome, 'tenant inativo'); return res.redirect(302, '/?erro=bloqueado'); }
   if (match && match.status === 'ativo'){ loginRegOk(ip); logAud(match.nome, 'login_ok', match.nome); setAuthCookie(res, match); return res.redirect(302, '/'); }
   loginRegFail(ip);
   logAud(null, 'login_falho', ip, 'PIN nao encontrado');
@@ -104,7 +111,7 @@ router.post('/login/criar', (req,res)=>{
     const stored = makePinHash(f.pin);
     const info = db.transaction(() => {
       if (pinEmUso(f.pin)) return null;
-      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em, tenant_id) VALUES (?,?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString(), DEFAULT_TENANT);
+      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em, tenant_id) VALUES (?,?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'master', new Date().toISOString(), DEFAULT_TENANT);
     }).immediate();
     if (!info) return res.redirect(302, '/?erro=pin_uso&modo=criar');
     logAud(nome, 'cadastro_criado', nome, 'primeiro acesso (admin)');
@@ -136,4 +143,4 @@ router.post('/logout', (req,res)=>{
 });
 
 
-module.exports = { router, hashPin, makePinHash, checkPin, pinFraco, pinEmUso, loginBloqueado, loginRegFail, loginRegOk, usersCount, getAuth, setAuthCookie, formFields, MSG_PIN_FRACO, MSG_PIN_EM_USO };
+module.exports = { router, hashPin, tenantBloqueado, makePinHash, checkPin, pinFraco, pinEmUso, loginBloqueado, loginRegFail, loginRegOk, usersCount, getAuth, setAuthCookie, formFields, MSG_PIN_FRACO, MSG_PIN_EM_USO };
