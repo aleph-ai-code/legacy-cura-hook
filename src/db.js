@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
-const { DATA_DIR, DB_FILE, LEGACY_JSON, BACKUP_DIR } = require('./config');
+const { DATA_DIR, DB_FILE, LEGACY_JSON, BACKUP_DIR, DEFAULT_TENANT } = require('./config');
+const { runMigrations } = require('./migrations/runner');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
@@ -55,6 +56,10 @@ try { db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'membro'"); } catch(e) {}
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
 
+// ===================== MIGRATIONS (Fase 1: multi-tenant) =====================
+runMigrations(db, [require('./migrations/001_tenants'), require('./migrations/002_tenant_id')]);
+const allRows = (tenantId) => db.prepare('SELECT * FROM events WHERE tenant_id=? ORDER BY ts ASC').all(tenantId || DEFAULT_TENANT);
+
 // Dedup: chave = webhook_evento + ':' + (venda.id ?? venda.uid ?? hash do body)
 function dedupKey(body){
   const ev = body && body.webhook_evento || 'outro';
@@ -63,8 +68,7 @@ function dedupKey(body){
   return ev + ':' + id;
 }
 
-const insStmt = db.prepare('INSERT OR IGNORE INTO events (id, origem, evento, venda_id, ts, json, dedup_key) VALUES (?,?,?,?,?,?,?)');
-const allRows = () => db.prepare('SELECT * FROM events ORDER BY ts ASC').all();
+const insStmt = db.prepare('INSERT OR IGNORE INTO events (id, origem, evento, venda_id, ts, json, dedup_key, tenant_id) VALUES (?,?,?,?,?,?,?,?)');
 const rowToEvent = (r) => { let body={}; try{ body=JSON.parse(r.json); }catch(e){} return { id:r.id, origem:r.origem, ts:r.ts, body }; };
 
 // Migração do events.json legado
@@ -77,7 +81,7 @@ const rowToEvent = (r) => { let body={}; try{ body=JSON.parse(r.json); }catch(e)
         const body = e.body || {};
         const ev = body.webhook_evento || 'outro';
         const vid = body.venda && (body.venda.id ?? body.venda.uid);
-        insStmt.run(String(e.id), String(e.origem||'desconhecida'), ev, vid==null?null:String(vid), String(e.ts||new Date().toISOString()), JSON.stringify(body), dedupKey(body));
+        insStmt.run(String(e.id), String(e.origem||'desconhecida'), ev, vid==null?null:String(vid), String(e.ts||new Date().toISOString()), JSON.stringify(body), dedupKey(body), DEFAULT_TENANT);
       }
     });
     tx(arr);
@@ -99,4 +103,4 @@ function doBackup(){
 }
 setInterval(doBackup, 24*60*60*1000);
 
-module.exports = { db, insStmt, dedupKey, allRows, rowToEvent, doBackup };
+module.exports = { db, insStmt, dedupKey, allRows, rowToEvent, doBackup, DEFAULT_TENANT };
