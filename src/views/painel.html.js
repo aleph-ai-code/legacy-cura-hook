@@ -84,6 +84,12 @@ table.recov td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05)}
 .btn-close{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--gold);color:#1a1033;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;line-height:1.4}
 @media(max-width:640px){.charts.open{inset:0;top:0;left:0;transform:none;width:100%;max-height:100%;border-radius:0;padding:12px 16px}}
 .btn:hover{filter:brightness(1.08)}
+.btn-ok{background:var(--ok);color:#10241a;margin:0 8px 0 0}
+.btn-danger{background:var(--danger);color:#fff;margin:0}
+.btn-warn{background:transparent;color:#ffc46b;border:1px solid var(--line);margin:0 8px 0 0}
+.btn-ghost{background:transparent;color:var(--gold2);border:1px solid var(--line);margin:0 4px 0 0}
+.mut-note{margin:10px 0 0;color:var(--mut);font-size:12px}
+.mut-note code{color:var(--gold2)}
 .rkbtns{display:flex;gap:8px;margin:4px 0}
 .rkbtns a{padding:6px 16px;border-radius:999px;border:1px solid var(--line);color:var(--gold2);text-decoration:none;font-size:12px;font-weight:600;line-height:1.4}
 .rkbtns a:hover{background:rgba(212,165,63,.1)}
