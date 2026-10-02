@@ -3,6 +3,8 @@ const router = express.Router();
 const { db, allRows, rowToEvent, doBackup } = require('./db');
 const { esc, logAud, requireUser, csvField, CHECKS, acoesForKeys, lastOf, onboardingInfo, localDay, localHour, fmtDT, fmtTime, fmtHHMM, fmtCardDT, chartCard, startOfToday, fmtBRL } = require('./util');
 const { PAGE } = require('./views/painel.html');
+const { DEFAULT_TENANT } = require('./util');
+const tenantOf = (req) => (req.user && req.user.tenant_id) || DEFAULT_TENANT;
 const { usersCardHtml } = require('./admin');
 const { auditResumoHtml, auditTableHtml } = require('./auditoria');
 const { rankingDrawerHtml } = require('./ranking');
@@ -12,9 +14,9 @@ router.post('/api/acao', (req,res)=>{
   const b = req.body || {};
   const eventId = String(b.event_id||'');
   if (!eventId || !ACAO_VALIDA.has(b.acao)) return res.status(400).json({ok:false, erro:'parametros_invalidos'});
-  const exists = db.prepare('SELECT 1 FROM events WHERE id=?').get(eventId);
+  const exists = db.prepare('SELECT 1 FROM events WHERE id=? AND tenant_id=?').get(eventId, tenantOf(req));
   if (!exists) return res.status(404).json({ok:false, erro:'evento_nao_encontrado'});
-  const lastOfAcao = db.prepare('SELECT * FROM acoes WHERE event_id=? AND acao=? ORDER BY id DESC LIMIT 1').get(eventId, b.acao);
+  const lastOfAcao = db.prepare('SELECT * FROM acoes WHERE event_id=? AND acao=? AND tenant_id=? ORDER BY id DESC LIMIT 1').get(eventId, b.acao, tenantOf(req));
   if (b.acao === 'claim_carrinho'){
     if (lastOfAcao){
       if (lastOfAcao.user_nome !== req.user.nome) return res.status(403).json({ok:false, erro:'lead assumido por ' + lastOfAcao.user_nome, assumido_por: lastOfAcao.user_nome});
@@ -22,13 +24,13 @@ router.post('/api/acao', (req,res)=>{
     }
   }
   if (b.acao === 'resultado_conquistou' || b.acao === 'resultado_nao' || b.acao === 'nota'){
-    const claim = db.prepare("SELECT * FROM acoes WHERE event_id=? AND acao='claim_carrinho' ORDER BY id DESC LIMIT 1").get(eventId);
+    const claim = db.prepare("SELECT * FROM acoes WHERE event_id=? AND acao='claim_carrinho' AND tenant_id=? ORDER BY id DESC LIMIT 1").get(eventId, tenantOf(req));
     if (!claim) return res.status(403).json({ok:false, erro:'lead ainda nao assumido'});
     if (claim.user_nome !== req.user.nome) return res.status(403).json({ok:false, erro:'lead assumido por ' + claim.user_nome});
   }
   if (lastOfAcao && (b.acao === 'resultado_conquistou' || b.acao === 'resultado_nao')) return res.status(409).json({ok:false, erro:'resultado ja registrado (use toggle)'});
-  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
-    .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString());
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts, tenant_id) VALUES (?,?,?,?,?,?)')
+    .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString(), tenantOf(req));
   logAud(req.user.nome, b.acao, eventId, b.detalhe || null);
   res.json({ok:true});
 });
@@ -37,22 +39,22 @@ router.post('/api/acao/toggle', (req,res)=>{
   const b = req.body || {};
   const eventId = String(b.event_id||'');
   if (!eventId || !ACAO_VALIDA.has(b.acao)) return res.status(400).json({ok:false, erro:'parametros_invalidos'});
-  const last = db.prepare('SELECT id FROM acoes WHERE event_id=? AND acao=? ORDER BY id DESC LIMIT 1').get(eventId, b.acao);
+  const last = db.prepare('SELECT id FROM acoes WHERE event_id=? AND acao=? AND tenant_id=? ORDER BY id DESC LIMIT 1').get(eventId, b.acao, tenantOf(req));
   if (last){ db.prepare('DELETE FROM acoes WHERE id=?').run(last.id); return res.json({ok:true, removido:true}); }
   if (b.acao === 'claim_carrinho') return res.status(404).json({ok:false, erro:'nada_para_remover'});
-  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)')
-    .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString());
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts, tenant_id) VALUES (?,?,?,?,?,?)')
+    .run(eventId, req.user.nome, b.acao, b.detalhe ? String(b.detalhe).slice(0,500) : null, new Date().toISOString(), tenantOf(req));
   logAud(req.user.nome, b.acao, eventId, b.detalhe || null);
   return res.json({ok:true, marcado:true});
 });
 
 router.get('/export.csv', (req,res)=>{
   const filtro = req.query.evento || 'todos';
-  let a = allRows().map(rowToEvent);
+  let a = allRows(tenantOf(req)).map(rowToEvent);
   if (filtro==='venda.paga' || filtro==='carrinho.abandonado') a = a.filter(e=>e.body && e.body.webhook_evento===filtro);
   const keys = [];
   for (const e of a){ const v=(e.body&&e.body.venda)||{}; keys.push(e.id, v.id != null ? String(v.id) : null); }
-  const amap = acoesForKeys(keys);
+  const amap = acoesForKeys(keys, tenantOf(req));
   const header = ['webhook_evento','venda.id','data','status','cliente.nome','cliente.cpf','cliente.email','cliente.whatsapp','produto.nome','valor','forma_pagamento','origem','link_recuperacao','onboarding_status','onboarding_por','carrinho_assumido_por','carrinho_resultado','ultima_acao_por'];
   const lines = [header.join(',')];
   for (const e of a){
@@ -90,8 +92,8 @@ router.get('/backup', (req,res)=>{
 });
 
 // ===================== GRAFICO SVG (vendas pagas) =====================
-function salesChart(){
-  const rows = db.prepare("SELECT ts FROM events WHERE evento='venda.paga'").all();
+function salesChart(tenantId){
+  const rows = db.prepare("SELECT ts FROM events WHERE evento='venda.paga' AND tenant_id=?").all(tenantId || DEFAULT_TENANT);
   const byDay = {}, byHour = {};
   const now = new Date();
   for (let i=13;i>=0;i--){ const d=new Date(now.getTime() - i*86400000); byDay[localDay(d)]=0; }
@@ -127,15 +129,15 @@ function salesChart(){
   return chartCard('Vendas por dia (14 dias)', svgDay) + chartCard('Vendas por hora (hoje)', svgHour);
 }
 // Recuperação por pessoa (drawer)
-function recoveryTable(){
-  const claims = db.prepare("SELECT event_id, user_nome FROM acoes WHERE acao='claim_carrinho' ORDER BY id ASC").all();
+function recoveryTable(tenantId){
+  const claims = db.prepare("SELECT event_id, user_nome FROM acoes WHERE acao='claim_carrinho' AND tenant_id=? ORDER BY id ASC").all(tenantId || DEFAULT_TENANT);
   const per = {};
   for (const c of claims){
     if (!per[c.user_nome]) per[c.user_nome] = { a:new Set(), c:new Set() };
     per[c.user_nome].a.add(c.event_id);
   }
-  const wins = db.prepare("SELECT event_id, user_nome FROM acoes WHERE acao='resultado_conquistou' ORDER BY id ASC").all();
-  const loses = db.prepare("SELECT event_id, user_nome FROM acoes WHERE acao='resultado_nao' ORDER BY id ASC").all();
+  const wins = db.prepare("SELECT event_id, user_nome FROM acoes WHERE acao='resultado_conquistou' AND tenant_id=? ORDER BY id ASC").all(tenantId || DEFAULT_TENANT);
+  const loses = db.prepare("SELECT event_id, user_nome FROM acoes WHERE acao='resultado_nao' AND tenant_id=? ORDER BY id ASC").all(tenantId || DEFAULT_TENANT);
   const lastResult = {};
   for (const r of wins.concat(loses).sort((a,b)=>a.id-b.id)) lastResult[r.event_id] = r;
   for (const r of Object.values(lastResult)){
@@ -158,7 +160,7 @@ function recoveryTable(){
 
 router.get('/', (req,res)=>{
   const filtro = req.query.evento || 'todos';
-  const all = allRows().slice(-5000).map(rowToEvent);
+  const all = allRows(tenantOf(req)).slice(-5000).map(rowToEvent);
   const t0 = startOfToday();
   const evo = all.filter(e=>!e.dedup && e.body && e.body.webhook_evento);
   const fatHoje = evo.filter(e=>e.body.webhook_evento==='venda.paga' && new Date(e.ts).getTime()>=t0)
@@ -264,7 +266,7 @@ router.get('/', (req,res)=>{
   const tabs = '<a href="#" class="tab on" data-tab=vendas onclick="setTab(&#39;vendas&#39;);return false">Vendas</a>'
     + (isAdmin ? '<a href="#" class=tab data-tab=admin onclick="setTab(&#39;admin&#39;);return false">Admin</a><a href="#" class=tab data-tab=auditoria onclick="setTab(&#39;auditoria&#39;);return false">Auditoria</a>' : '');
   if (isAdmin){
-    const pend = db.prepare("SELECT nome, criado_em FROM users WHERE status='pendente' ORDER BY id ASC").all();
+    const pend = db.prepare("SELECT nome, criado_em FROM users WHERE status='pendente' AND tenant_id=? ORDER BY id ASC").all(tenantOf(req));
     if (pend.length){
       adminBadge = ' <a href="#" class="badge b-orange" style="text-decoration:none;margin-left:8px" onclick="setTab(&#39;admin&#39;);return false">⏳ ' + pend.length + ' aprovaç' + (pend.length===1?'ão':'ões') + ' pendente' + (pend.length===1?'':'s') + '</a>';
       let rows = '';
@@ -280,7 +282,7 @@ router.get('/', (req,res)=>{
   }
   if (isAdmin){
     adminHtml += usersCardHtml(req);
-    const auditRows = db.prepare('SELECT * FROM auditoria ORDER BY id DESC LIMIT 100').all();
+    const auditRows = db.prepare('SELECT * FROM auditoria WHERE tenant_id=? ORDER BY id DESC LIMIT 100').all(tenantOf(req));
     auditHtml = '<div class=card style="margin:16px 0"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><h3 style="margin:0;font-size:16px;color:var(--gold2)">📜 Auditoria</h3><a class=btn-csv href="/auditoria">Abrir página completa (filtros + CSV)</a></div>' + auditResumoHtml() + auditTableHtml(auditRows) + '</div>';
   }
   const cls = f => (filtro===f?'on':'');
@@ -295,8 +297,8 @@ router.get('/', (req,res)=>{
     .replace('__C0__', cls('todos')).replace('__C1__', cls('venda.paga')).replace('__C2__', cls('carrinho.abandonado'))
     .replace('__EVENC__', encodeURIComponent(filtro))
     .replace('__CHARTMINI__', stats.pagasDia + (stats.pagasDia===1 ? ' venda hoje' : ' vendas hoje'))
-    .replace('__CHART__', salesChart() + recoveryTable())
-    .replace('__RANK__', rankingDrawerHtml())
+    .replace('__CHART__', salesChart(tenantOf(req)) + recoveryTable(tenantOf(req)))
+    .replace('__RANK__', rankingDrawerHtml(tenantOf(req)))
     .replace('__TABS__', tabs)
     .replace('__ADMINBADGE__', adminBadge)
     .replace('__ADMIN__', adminHtml)

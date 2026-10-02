@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
-const { CHECKS, esc, chartCard, startOfToday, requireUser } = require('./util');
+const { CHECKS, esc, chartCard, startOfToday, requireUser, DEFAULT_TENANT } = require('./util');
 // ===================== RANKING DO TIME (drawer) =====================
-function rankPer(since){
-  const all = db.prepare('SELECT user_nome, acao FROM acoes WHERE ts >= ?').all(new Date(since).toISOString());
+function rankPer(since, tenantId){
+  const all = db.prepare('SELECT user_nome, acao FROM acoes WHERE ts >= ? AND tenant_id=?').all(new Date(since).toISOString(), tenantId || DEFAULT_TENANT);
   const onb = {}, claims = {}, wins = {}, tot = {};
   for (const r of all){
     const u = r.user_nome || '?';
@@ -39,8 +39,8 @@ function rankPeriodHtml(p){
     + chartCard('🛒 Recuperação (assumidos · conquistados · taxa)', svgRank(p.rec))
     + chartCard('🔥 Atividade (ações no sistema)', svgRank(p.tot));
 }
-function rankingDrawerHtml(){
-  const hoje = rankPer(startOfToday()), d7 = rankPer(Date.now() - 7*86400000);
+function rankingDrawerHtml(tenantId){
+  const hoje = rankPer(startOfToday(), tenantId), d7 = rankPer(Date.now() - 7*86400000, tenantId);
   return '<div class=charts id=ranking-drawer><div class=charts-head><h3>🏆 Ranking do Time</h3><a id=rank-close class=btn-close href=#>✕ Fechar</a></div>'
     + '<div class=rkbtns><a href=# class="rk-btn on" data-p=hoje>Hoje</a><a href=# class=rk-btn data-p=d7>7 dias</a></div>'
     + '<div id=rk-hoje>' + rankPeriodHtml(hoje) + '</div>'
@@ -50,7 +50,7 @@ function rankingDrawerHtml(){
 router.get('/api/ranking', (req,res)=>{
   if (!requireUser(req,res)) return;
   const p = String(req.query.periodo||'hoje') === 'd7' ? 'd7' : 'hoje';
-  const r = rankPer(p === 'd7' ? Date.now() - 7*86400000 : startOfToday());
+  const r = rankPer(p === 'd7' ? Date.now() - 7*86400000 : startOfToday(), (req.user && req.user.tenant_id) || DEFAULT_TENANT);
   res.json({ok:true, periodo:p, onboarding:r.onb, recuperacao:r.rec, atividade:r.tot});
 });
 
