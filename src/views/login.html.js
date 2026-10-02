@@ -39,7 +39,8 @@ function loginPage(err, mode){
     '<form method=post action=/login/novo>' +
     '<input type=text name=nome placeholder="Seu nome" required maxlength=60>' +
     '<input type=password name=pin placeholder="PIN (mínimo 6 dígitos)" required inputmode=numeric maxlength=12 style="margin-top:12px">' +
-    '<button class=pill>Criar acesso</button><div class=hint>Seu cadastro ficará aguardando aprovação do admin.</div></form></div>');
+    '<button class=pill>Criar acesso</button><div class=hint>Seu cadastro ficará aguardando aprovação do admin.</div></form>' +
+    '<div class=hint style="margin-top:12px">É uma empresa? <a href=/registrar style=color:var(--gold2)>Registre-se aqui</a> e crie o painel da sua equipe.</div></div>');
 }
 
 module.exports = { inputCss, pageShell, loginPage };

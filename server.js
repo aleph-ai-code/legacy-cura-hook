@@ -16,7 +16,8 @@ app.use(express.text({type:'*/*', limit:'2mb'}));
 // Middleware: tudo exige cookie, EXCETO webhook (EVO nao autentica) e login/logout
 app.use((req,res,next)=>{
   if (req.path.startsWith('/hook/')) return next();
-  if (req.method==='POST' && (req.path==='/login' || req.path==='/login/criar' || req.path==='/login/novo' || req.path==='/logout')) return next();
+  if (req.method==='POST' && (req.path==='/login' || req.path==='/login/criar' || req.path==='/login/novo' || req.path==='/logout' || req.path==='/registrar')) return next();
+  if (req.method==='GET' && req.path==='/registrar') return next();
   if (req.path==='/favicon.ico') return res.status(404).end();
   const user = getAuth(req);
   if (user){ req.user = user; return next(); }
@@ -27,6 +28,8 @@ app.use((req,res,next)=>{
 });
 
 app.use(require('./src/auth').router);   // /login, /login/criar, /login/novo, /logout
+app.use(require('./src/registrar'));     // /registrar (self-service de tenant)
+app.use(require('./src/tenants').router);// /admin/tenant/* (master)
 app.use(require('./src/admin').router);  // /admin/*, /me/trocar_pin
 app.use(require('./src/auditoria').router); // /auditoria, /auditoria.csv
 app.use(require('./src/ranking').router);   // /api/ranking
