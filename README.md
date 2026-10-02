@@ -49,17 +49,17 @@ Ver README-DEPLOY.md (redeploy manual no working_dir do Dokploy, preservando o .
 ## Planos e Billing (Fase 3)
 
 - Planos: **free** (trial 30 dias, 3 users, 500 eventos/mês), **basico** (10 users, 5.000 eventos/mês, export CSV), **pro** (50 users, 50.000 eventos/mês, export CSV + API), **master** (sem limite — tenant default LEGACY).
-- Limites ajustáveis por env: , , , .
+- Limites ajustáveis por env: `PLANO_FREE_MAX_USERS`, `PLANO_FREE_MAX_EVENTS_MES`, `PLANO_BASICO_MAX_USERS`, `PLANO_BASICO_MAX_EVENTS_MES`, `PLANO_PRO_MAX_USERS`, `PLANO_PRO_MAX_EVENTS_MES`.
 - Trial/plano expirado: painel do tenant mostra página **"Plano expirado — renove"** (dados preservados) e o webhook do tenant responde **402**. Master e tenant default nunca são bloqueados.
-- Eventos acima do limite mensal são gravados normalmente com  (nunca perde venda).
+- Eventos acima do limite mensal são gravados normalmente com `over_limit=1` (nunca perde venda).
 - Card **💳 Financeiro** no painel master: plano/trial/pago de cada tenant + botão de ativar plano manualmente (para Pix que cai fora do webhook).
 
 ### Como plugar Mercado Pago (quando as credenciais existirem)
 
 Defina no  do deploy (Dokploy) e reinicie:
 
--  — token de produção do Mercado Pago. Enquanto ausente, o webhook roda em **modo seco**: loga o payload, responde 200 e não ativa nada.
--  — segredo usado para validar a assinatura HMAC-SHA256 (header ) do webhook. Sem ele, a rota aceita qualquer chamada (use só em dev).
--  /  — links de pagamento/checkout exibidos na página de renove.
+- `MP_ACCESS_TOKEN` — token de produção do Mercado Pago. Enquanto ausente, o webhook roda em **modo seco**: loga o payload, responde 200 e não ativa nada.
+- `MP_WEBHOOK_SECRET` — segredo usado para validar a assinatura HMAC-SHA256 (header `x-signature`) do webhook. Sem ele, a rota aceita qualquer chamada (use só em dev).
+- `MP_PLAN_LINK_BASICO` / `MP_PLAN_LINK_PRO` — links de pagamento/checkout exibidos na página de renove.
 
-Fluxo: configure no MP um webhook apontando para  (rota livre, sem cookie). O payload padrão usa  no formato ; pagamento  ativa o plano por 30 dias (). Ativação manual: painel master → 💳 Financeiro.
+Fluxo: configure no MP um webhook apontando para `POST /webhook/pagamento` (rota livre, sem cookie). O payload padrão usa `external_reference` no formato `tenant:<id>:plano:<basico|pro>`; pagamento `approved` ativa o plano por 30 dias (`pago_ate`). Ativação manual: painel master → 💳 Financeiro.
