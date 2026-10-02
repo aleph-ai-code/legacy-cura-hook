@@ -7,6 +7,7 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY server.js package.json ./
+COPY src ./src
 VOLUME /data
 EXPOSE 3210
 ENV TZ=America/Fortaleza
