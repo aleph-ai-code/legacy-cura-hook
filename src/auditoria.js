@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
-const { esc, requireAdmin, csvField, fmtHHMM, startOfToday } = require('./util');
+const { esc, requireAdmin, csvField, fmtHHMM, fmtDT, startOfToday } = require('./util');
 // ===== Auditoria: descricao legivel + resumo do dia =====
 const ACAO_TXT = {
   login_ok:['entrou no sistema',''], login_falho:['tentou entrar (PIN incorreto)',''], login_bloqueado:['tentou entrar (bloqueado)',''],
@@ -69,4 +69,6 @@ router.get('/auditoria.csv', (req,res)=>{
   res.send('\ufeff' + lines.join('\r\n'));
 });
 
-module.exports = router;
+module.exports.auditResumoHtml = auditResumoHtml;
+module.exports.auditTableHtml = auditTableHtml;
+module.exports.router = router;
