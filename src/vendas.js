@@ -5,7 +5,9 @@ const { esc, logAud, requireUser, csvField, CHECKS, acoesForKeys, lastOf, onboar
 const { PAGE } = require('./views/painel.html');
 const { DEFAULT_TENANT } = require('./util');
 const tenantOf = (req) => (req.user && req.user.tenant_id) || DEFAULT_TENANT;
-const { usersCardHtml } = require('./admin');
+const { usersCardHtml, pendentesHtml } = require('./admin');
+const { tenantsCardHtml } = require('./tenants');
+const { isMaster } = require('./util');
 const { auditResumoHtml, auditTableHtml } = require('./auditoria');
 const { rankingDrawerHtml } = require('./ranking');
 const ACAO_VALIDA = new Set(['check_boasvindas','check_removido_vip','check_onboarding_ok','claim_carrinho','resultado_conquistou','resultado_nao','nota']);
@@ -261,26 +263,21 @@ router.get('/', (req,res)=>{
   };
 
   const feed = a.map(card).join('') || '<div class=empty>Nenhum evento ainda. Faça um POST em /hook/teste.</div>';
-  const isAdmin = req.user && req.user.role === 'admin';
+  const isAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'master');
   let adminBadge = '', adminHtml = '', auditHtml = '';
   const tabs = '<a href="#" class="tab on" data-tab=vendas onclick="setTab(&#39;vendas&#39;);return false">Vendas</a>'
     + (isAdmin ? '<a href="#" class=tab data-tab=admin onclick="setTab(&#39;admin&#39;);return false">Admin</a><a href="#" class=tab data-tab=auditoria onclick="setTab(&#39;auditoria&#39;);return false">Auditoria</a>' : '');
   if (isAdmin){
-    const pend = db.prepare("SELECT nome, criado_em FROM users WHERE status='pendente' AND tenant_id=? ORDER BY id ASC").all(tenantOf(req));
-    if (pend.length){
-      adminBadge = ' <a href="#" class="badge b-orange" style="text-decoration:none;margin-left:8px" onclick="setTab(&#39;admin&#39;);return false">⏳ ' + pend.length + ' aprovaç' + (pend.length===1?'ão':'ões') + ' pendente' + (pend.length===1?'':'s') + '</a>';
-      let rows = '';
-      for (const p of pend){
-        rows += '<tr><td>' + esc(p.nome) + '</td><td>' + fmtCardDT(p.criado_em) + '</td>'
-          + '<td style="text-align:right"><button class="btn" style="margin:0 8px 0 0;background:#39d98a" onclick="doAdmin(&#39;aprovar&#39;,&#39;' + esc(p.nome) + '&#39;)">Aprovar</button>'
-          + '<button class="btn" style="margin:0;background:#b04a4a;color:#fff" onclick="doAdmin(&#39;rejeitar&#39;,&#39;' + esc(p.nome) + '&#39;)">Rejeitar</button></td></tr>';
-      }
-      adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (' + pend.length + ')</h3>'
-        + '<table class=recov><tr><th>Nome</th><th>Cadastrado</th><th></th></tr>' + rows + '</table></div>';
+    const pendN = isMaster(req.user)
+      ? db.prepare("SELECT COUNT(*) c FROM users WHERE status='pendente'").get().c
+      : db.prepare("SELECT COUNT(*) c FROM users WHERE status='pendente' AND tenant_id=?").get(tenantOf(req)).c;
+    const tenN = isMaster(req.user) ? db.prepare("SELECT COUNT(*) c FROM tenants WHERE status='pendente'").get().c : 0;
+    const totN = pendN + tenN;
+    if (totN){
+      adminBadge = ' <a href="#" class="badge b-orange" style="text-decoration:none;margin-left:8px" onclick="setTab(&#39;admin&#39;);return false">⏳ ' + totN + ' aprovaç' + (totN===1?'ão':'ões') + ' pendente' + (totN===1?'':'s') + '</a>';
     }
-    if (!adminHtml) adminHtml = '<div class=card style="margin:16px 0"><h3 style="margin:0 0 12px;font-size:16px;color:var(--gold2)">🛡️ Admin · Aprovações (0)</h3><div style="color:var(--mut);font-size:13px">Nenhum cadastro pendente. 🎉</div></div>';
-  }
-  if (isAdmin){
+    adminHtml = pendentesHtml(req);
+    if (isMaster(req.user)) adminHtml = tenantsCardHtml(req) + adminHtml;
     adminHtml += usersCardHtml(req);
     const auditRows = db.prepare('SELECT * FROM auditoria WHERE tenant_id=? ORDER BY id DESC LIMIT 100').all(tenantOf(req));
     auditHtml = '<div class=card style="margin:16px 0"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><h3 style="margin:0;font-size:16px;color:var(--gold2)">📜 Auditoria</h3><a class=btn-csv href="/auditoria">Abrir página completa (filtros + CSV)</a></div>' + auditResumoHtml() + auditTableHtml(auditRows) + '</div>';
