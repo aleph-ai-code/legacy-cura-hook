@@ -57,7 +57,7 @@ try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'membro'"
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)');
 
 // ===================== MIGRATIONS (Fase 1: multi-tenant) =====================
-runMigrations(db, [require('./migrations/001_tenants'), require('./migrations/002_tenant_id'), require('./migrations/003_master_role')]);
+runMigrations(db, [require('./migrations/001_tenants'), require('./migrations/002_tenant_id'), require('./migrations/003_master_role'), require('./migrations/004_billing')]);
 const allRows = (tenantId) => db.prepare('SELECT * FROM events WHERE tenant_id=? ORDER BY ts ASC').all(tenantId || DEFAULT_TENANT);
 
 // Dedup: chave = webhook_evento + ':' + (venda.id ?? venda.uid ?? hash do body)

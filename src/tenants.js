@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
 const { esc, requireMaster, uuidv7, fmtCardDT } = require('./util');
+const { PLANOS } = require('./config');
 // ===================== TENANTS: resolucao + routes master =====================
 function resolveTenant(idOrSub){
   if (!idOrSub) return null;
@@ -15,8 +16,9 @@ function subLivre(sub){ return !db.prepare('SELECT 1 FROM tenants WHERE subdomin
 
 function criarTenant({ nome, subdominio }){
   const id = 't-' + uuidv7();
-  db.prepare("INSERT INTO tenants (id, nome, subdominio, plano, status, criado_em) VALUES (?,?,?,?,?,?)")
-    .run(id, String(nome).slice(0,120), String(subdominio), 'free', 'pendente', new Date().toISOString());
+  const trialDias = (PLANOS.free && PLANOS.free.trial_dias) || 30;
+  db.prepare("INSERT INTO tenants (id, nome, subdominio, plano, status, criado_em, trial_ate) VALUES (?,?,?,?,?,?,?)")
+    .run(id, String(nome).slice(0,120), String(subdominio), 'free', 'pendente', new Date().toISOString(), new Date(Date.now() + trialDias*86400000).toISOString());
   return db.prepare('SELECT * FROM tenants WHERE id=?').get(id);
 }
 
