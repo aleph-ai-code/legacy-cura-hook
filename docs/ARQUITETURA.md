@@ -5,7 +5,7 @@ Painel + coletor de webhooks multi-tenant (Express + better-sqlite3), deploy Dok
 ## Stack
 - Node/Express, SQLite (WAL) em `/data/events.db`, backups diários em `/data/backups/`
 - Auth por PIN (scrypt) + cookie assinado (HMAC `PAINEL_SECRET`), rate limit de login
-- Suite própria: `node test/run.js` (76 testes, incluindo 2 boots de idempotência)
+- Suite própria: `node test/run.js` (96 testes, incluindo 2 boots de idempotência)
 
 ## Módulos (src/)
 | Módulo | Papel |
@@ -17,6 +17,8 @@ Painel + coletor de webhooks multi-tenant (Express + better-sqlite3), deploy Dok
 | registrar.js | self-service de tenant (trial 30d, nasce pendente) |
 | tenants.js | resolução de tenant + rotas master (aprovar/rejeitar/suspender) |
 | billing.js | Fase 3: planos, enforcement, webhook MP, card Financeiro |
+| metricas.js | Fase 4: métricas de uso por tenant (base de cobrança), CSV, export por tenant |
+| sobre.js | Fase 4: landing institucional pública (/sobre) |
 | webhooks.js | POST /hook/:tenant/:origem (dedupe, over_limit, 402 plano expirado) |
 | vendas.js | painel, feed, KPIs, gráficos, export.csv, ações |
 | auditoria.js / ranking.js | auditoria e ranking do time |
@@ -34,10 +36,17 @@ Painel + coletor de webhooks multi-tenant (Express + better-sqlite3), deploy Dok
   - Billing scaffolding MP: `POST /webhook/pagamento` (rota livre, assinatura HMAC `MP_WEBHOOK_SECRET`); sem `MP_ACCESS_TOKEN` = modo seco (loga, 200, não ativa). Pagamento aprovado → `plano` + `pago_ate` +30d (via `external_reference` `tenant:<id>:plano:<plano>`).
   - Admin master: card 💳 Financeiro (plano/trial/pago de cada tenant) + ativação manual de plano (`POST /admin/tenant/plano`).
 
-## Fase 4 (pendente)
-- Integração MP real: criar assinaturas/links de checkout, consultar payment por id na API, conciliação.
-- Cobrança recorrente/lembretes de renovação; downgrade automático.
-- Feature `api` (API pública por plano) e limites por recurso com medição.
+## Fase 4 (implementada)
+- **Métricas por tenant** (base de cobrança): card 📊 Métricas no painel master (eventos no mês com over_limit, users ativos, último acesso, plano, trial/pago até). Endpoints master-only: `GET /master/metricas` (JSON), `GET /master/metricas.csv` (export), `GET /master/export/:tenant_id` (backup lógico CSV por tenant). `login_ok` agora registra o tenant (alimenta "último acesso").
+- **Backups**: diários em `/data/backups/` com retenção de 14 (`pruneBackups`); timer com `.unref()` para não segurar processos.
+- **Landing de vendas**: `GET /sobre` pública, estática, tema do painel, CTA "Criar conta grátis" → /registrar (sem dados reais).
+- **Hardening**: rate limit em `POST /registrar` (5/hora por IP, bloqueio 1h, mesmo padrão do login); headers globais `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. Webhooks (/hook/*, /webhook/pagamento) continuam livres de auth.
+
+## Pendências de decisão do dono
+- **Domínio próprio**: onde apontar (decisão de compra/subdomínio pendente) — hoje só documentado.
+- **MP real**: criar assinaturas/links de checkout, consultar payment por id na API, conciliação (hoje scaffolding modo seco).
+- **Cobrança recorrente**: lembretes de renovação, downgrade automático.
+- **API pública por plano**: feature `api` e limites por recurso com medição.
 
 ## Deploy
 Dokploy: working_dir `/etc/dokploy/compose/legacybot-legacywebhook-lcuhjd/code` → `git fetch && git reset --hard origin/main && docker compose up -d --build`. Backup do banco antes de mudanças: `VACUUM INTO /data/backups/pre-<tag>-<data>.db`.

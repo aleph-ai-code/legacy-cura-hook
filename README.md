@@ -38,6 +38,16 @@ Healthcheck: `POST /hook/healthcheck` → 200.
 
 Isolamento: todas as rotas `/admin` e APIs são escopadas por `tenant_id`; suspensão do tenant bloqueia login, sessões e webhook da empresa. PIN de login é **único global** (login é feito só pelo PIN).
 
+## Landing pública (Fase 4)
+
+- `GET /sobre` — página institucional estática (tema do painel, sem dados reais), com CTA **Criar conta grátis** → `/registrar`.
+
+## Métricas e backups (Fase 4)
+
+- Painel master tem o card **📊 Métricas** (mês atual por tenant: eventos, over_limit, users ativos, último acesso, plano, trial/pago até) — base de cobrança.
+- Master-only: `GET /master/metricas` (JSON), `GET /master/metricas.csv` (export), `GET /master/export/:tenant_id` (backup lógico CSV por tenant).
+- Backup diário automático em `/data/backups/` com retenção de **14** dias.
+
 ## Testes
 
     npm ci && node test/run.js
@@ -53,6 +63,7 @@ Ver README-DEPLOY.md (redeploy manual no working_dir do Dokploy, preservando o .
 - Trial/plano expirado: painel do tenant mostra página **"Plano expirado — renove"** (dados preservados) e o webhook do tenant responde **402**. Master e tenant default nunca são bloqueados.
 - Eventos acima do limite mensal são gravados normalmente com `over_limit=1` (nunca perde venda).
 - Card **💳 Financeiro** no painel master: plano/trial/pago de cada tenant + botão de ativar plano manualmente (para Pix que cai fora do webhook).
+- Rate limit: login (5 falhas/5min → bloqueio 15min) e `POST /registrar` (5/hora por IP). Headers de segurança globais: X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin.
 
 ### Como plugar Mercado Pago (quando as credenciais existirem)
 
