@@ -1,7 +1,7 @@
 // Template HTML do painel (CSS + JS do cliente inline, como no legado)
 // ===================== PAINEL LEGACY (design pass: grid, ritmo, hierarquia) =====================
 const PAGE = `<!doctype html><html lang=pt-BR><head><meta charset=utf-8><title>LEGACY · Painel de Vendas</title><meta name=viewport content="width=device-width,initial-scale=1"><style>
-:root{--gold:#d4a53f;--gold2:#eecf7e;--bg:#17251d;--card:#213629;--line:rgba(212,165,63,.25);--txt:#f7f3e9;--mut:#a8b0a0}
+:root{--gold:#d4a53f;--gold2:#eecf7e;--bg:#17251d;--card:#213629;--line:rgba(212,165,63,.25);--txt:#f7f3e9;--mut:#a8b0a0;--ok:#39d98a;--danger:#b04a4a;--gold-soft:rgba(212,165,63,.45);--ok-soft:rgba(57,217,138,.15);--danger-soft:#e08a8a}
 *{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5}
 .wrap{max-width:1100px;margin:0 auto;padding:0 24px}
