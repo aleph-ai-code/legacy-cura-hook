@@ -3,7 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const { AUTH_SECRET, AUTH_COOKIE } = require('./config');
 const { db } = require('./db');
-const { logAud } = require('./util');
+const { logAud, DEFAULT_TENANT } = require('./util');
 // ===================== USUARIOS + LOGIN (nome + PIN) =====================
 function hashPin(pin, salt){ return crypto.scryptSync(String(pin), salt, 64).toString('hex'); }
 function makePinHash(pin){ const salt = crypto.randomBytes(16).toString('hex'); return salt + ':' + hashPin(pin, salt); }
@@ -46,7 +46,7 @@ const usersCount = () => db.prepare('SELECT COUNT(*) c FROM users').get().c;
 function sign(payload){ return crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex'); }
 function makeToken(user){
   const exp = Date.now() + 30*24*3600*1000;
-  const payload = Buffer.from(JSON.stringify({ id: user.id, nome: user.nome, exp })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ id: user.id, nome: user.nome, tenant_id: user.tenant_id || DEFAULT_TENANT, exp })).toString('base64url');
   return payload + '.' + sign(payload);
 }
 function parseToken(tok){
@@ -58,7 +58,7 @@ function parseToken(tok){
     if (!safeEq(sig, sign(payload))) return null;
     const d = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (!d.exp || d.exp < Date.now()) return null;
-  const u = db.prepare('SELECT id, nome, status, role FROM users WHERE id=?').get(d.id);
+  const u = db.prepare('SELECT id, nome, status, role, tenant_id FROM users WHERE id=?').get(d.id);
   return (u && u.nome === d.nome && u.status === 'ativo') ? u : null;
   } catch(e){ return null; }
 }
@@ -104,7 +104,7 @@ router.post('/login/criar', (req,res)=>{
     const stored = makePinHash(f.pin);
     const info = db.transaction(() => {
       if (pinEmUso(f.pin)) return null;
-      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString());
+      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em, tenant_id) VALUES (?,?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'ativo', 'admin', new Date().toISOString(), DEFAULT_TENANT);
     }).immediate();
     if (!info) return res.redirect(302, '/?erro=pin_uso&modo=criar');
     logAud(nome, 'cadastro_criado', nome, 'primeiro acesso (admin)');
@@ -123,7 +123,7 @@ router.post('/login/novo', (req,res)=>{
     const stored = makePinHash(f.pin);
     const info = db.transaction(() => {
       if (pinEmUso(f.pin)) return null;
-      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em) VALUES (?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString());
+      return db.prepare("INSERT INTO users (nome, pin_hash, salt, status, role, criado_em, tenant_id) VALUES (?,?,?,?,?,?,?)").run(nome, stored, stored.split(':')[0], 'pendente', 'membro', new Date().toISOString(), DEFAULT_TENANT);
     }).immediate();
     if (!info) return res.redirect(302, '/?erro=pin_uso');
     logAud(nome, 'cadastro_criado', nome, 'aguardando aprovacao');

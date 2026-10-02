@@ -3,26 +3,27 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
 const { checkPin, makePinHash, pinFraco, pinEmUso } = require('./auth');
-const { esc, logAud, adminCountExcept, requireAdmin } = require('./util');
+const { esc, logAud, adminCountExcept, requireAdmin, DEFAULT_TENANT } = require('./util');
+const tenantOf = (req) => (req.user && req.user.tenant_id) || DEFAULT_TENANT;
 // ===================== ADMIN: aprovacao de cadastros =====================
 const pendentesCount = () => db.prepare("SELECT COUNT(*) c FROM users WHERE status='pendente'").get().c;
 router.post('/admin/aprovar', (req,res)=>{
   if (!requireAdmin(req,res)) return;
   const nome = String((req.body||{}).nome||'').trim();
-  const u = db.prepare("SELECT * FROM users WHERE nome=? AND status='pendente'").get(nome);
+  const u = db.prepare("SELECT * FROM users WHERE nome=? AND status='pendente' AND tenant_id=?").get(nome, tenantOf(req));
   if (!u) return res.status(404).json({ok:false, erro:'cadastro_nao_encontrado'});
   db.prepare("UPDATE users SET status='ativo' WHERE id=?").run(u.id);
-  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)').run('cadastro', req.user.nome, 'aprovar_cadastro', nome, new Date().toISOString());
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts, tenant_id) VALUES (?,?,?,?,?,?)').run('cadastro', req.user.nome, 'aprovar_cadastro', nome, new Date().toISOString(), tenantOf(req));
   logAud(req.user.nome, 'aprovado', nome);
   res.json({ok:true});
 });
 router.post('/admin/rejeitar', (req,res)=>{
   if (!requireAdmin(req,res)) return;
   const nome = String((req.body||{}).nome||'').trim();
-  const u = db.prepare("SELECT * FROM users WHERE nome=? AND status='pendente'").get(nome);
+  const u = db.prepare("SELECT * FROM users WHERE nome=? AND status='pendente' AND tenant_id=?").get(nome, tenantOf(req));
   if (!u) return res.status(404).json({ok:false, erro:'cadastro_nao_encontrado'});
   db.prepare('DELETE FROM users WHERE id=?').run(u.id);
-  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts) VALUES (?,?,?,?,?)').run('cadastro', req.user.nome, 'rejeitar_cadastro', nome, new Date().toISOString());
+  db.prepare('INSERT INTO acoes (event_id, user_nome, acao, detalhe, ts, tenant_id) VALUES (?,?,?,?,?,?)').run('cadastro', req.user.nome, 'rejeitar_cadastro', nome, new Date().toISOString(), tenantOf(req));
   logAud(req.user.nome, 'rejeitado', nome);
   res.json({ok:true});
 });
@@ -31,9 +32,9 @@ router.post('/admin/editar_nome', (req,res)=>{
   const b = req.body||{};
   const nome = String(b.nome||'').trim(), novo = String(b.novo_nome||'').trim();
   if (!nome || !novo || nome===novo) return res.status(400).json({ok:false, erro:'parametros_invalidos'});
-  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  const u = db.prepare('SELECT * FROM users WHERE nome=? AND tenant_id=?').get(nome, tenantOf(req));
   if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
-  if (db.prepare('SELECT 1 FROM users WHERE nome=?').get(novo)) return res.status(409).json({ok:false, erro:'nome_ja_existe'});
+  if (db.prepare('SELECT 1 FROM users WHERE nome=? AND tenant_id=?').get(novo, tenantOf(req))) return res.status(409).json({ok:false, erro:'nome_ja_existe'});
   db.prepare('UPDATE users SET nome=? WHERE id=?').run(novo, u.id);
   logAud(req.user.nome, 'nome_editado', nome, 'novo nome: ' + novo);
   res.json({ok:true});
@@ -41,7 +42,7 @@ router.post('/admin/editar_nome', (req,res)=>{
 router.post('/admin/resetar_pin', (req,res)=>{
   if (!requireAdmin(req,res)) return;
   const nome = String((req.body||{}).nome||'').trim();
-  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  const u = db.prepare('SELECT * FROM users WHERE nome=? AND tenant_id=?').get(nome, tenantOf(req));
   if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
   let pin;
   do { pin = String(crypto.randomInt(100000, 1000000)); } while (pinFraco(pin) || pinEmUso(pin, u.id));
@@ -53,12 +54,12 @@ router.post('/admin/resetar_pin', (req,res)=>{
 router.post('/admin/bloquear', (req,res)=>{
   if (!requireAdmin(req,res)) return;
   const b = req.body||{}; const nome = String(b.nome||'').trim();
-  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  const u = db.prepare('SELECT * FROM users WHERE nome=? AND tenant_id=?').get(nome, tenantOf(req));
   if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
   const bloquear = !(b.bloquear === false || b.bloquear === 'false');
   if (bloquear){
     if (u.nome === req.user.nome) return res.status(403).json({ok:false, erro:'nao_pode_bloquear_a_si_mesmo'});
-    if (u.role === 'admin' && adminCountExcept(nome) === 0) return res.status(403).json({ok:false, erro:'ultimo_admin'});
+    if (u.role === 'admin' && adminCountExcept(nome, tenantOf(req)) === 0) return res.status(403).json({ok:false, erro:'ultimo_admin'});
     db.prepare("UPDATE users SET status='bloqueado' WHERE id=?").run(u.id);
     logAud(req.user.nome, 'bloqueado', nome);
   } else {
@@ -70,7 +71,7 @@ router.post('/admin/bloquear', (req,res)=>{
 router.post('/admin/excluir', (req,res)=>{
   if (!requireAdmin(req,res)) return;
   const nome = String((req.body||{}).nome||'').trim();
-  const u = db.prepare('SELECT * FROM users WHERE nome=?').get(nome);
+  const u = db.prepare('SELECT * FROM users WHERE nome=? AND tenant_id=?').get(nome, tenantOf(req));
   if (!u) return res.status(404).json({ok:false, erro:'usuario_nao_encontrado'});
   if (u.nome === req.user.nome) return res.status(403).json({ok:false, erro:'nao_pode_excluir_a_si_mesmo'});
   if (u.role === 'admin' && adminCountExcept(nome) === 0) return res.status(403).json({ok:false, erro:'ultimo_admin'});
@@ -85,7 +86,7 @@ router.post('/me/trocar_pin', (req,res)=>{
   const atual = String(b.pin_atual||''), novo = String(b.pin_novo||'');
   const fracoNovo = pinFraco(novo);
   if (fracoNovo) return res.status(400).json({ok:false, erro: fracoNovo==='formato' ? 'pin_invalido' : 'pin_fraco', msg: fracoNovo==='formato' ? 'O PIN precisa ter no minimo 6 digitos (apenas numeros).' : MSG_PIN_FRACO});
-  const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
+  const u = db.prepare('SELECT * FROM users WHERE id=? AND tenant_id=?').get(req.user.id, tenantOf(req));
   if (!u || !checkPin(atual, u.pin_hash)) return res.status(403).json({ok:false, erro:'pin_atual_incorreto'});
   if (pinEmUso(novo, u.id)) return res.status(409).json({ok:false, erro:'pin_em_uso', msg: MSG_PIN_EM_USO});
   const stored = makePinHash(novo);
@@ -95,7 +96,7 @@ router.post('/me/trocar_pin', (req,res)=>{
 });
 
 function usersCardHtml(req){
-  const usersAll = db.prepare('SELECT nome, status, role, criado_em FROM users ORDER BY id ASC').all();
+  const usersAll = db.prepare('SELECT nome, status, role, criado_em FROM users WHERE tenant_id=? ORDER BY id ASC').all(tenantOf(req));
   let urows = '';
   for (const uu of usersAll){
     const self = uu.nome === req.user.nome;
