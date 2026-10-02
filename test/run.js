@@ -29,12 +29,12 @@ const TMP = fs.mkdtempSync('/tmp/lch-test-');
 const PORT = 30000 + (process.pid % 20000);
 const BASE = 'http://127.0.0.1:' + PORT;
 function boot(){
-  const child = spawn('node', ['server.js'], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP, PORT: String(PORT), PAINEL_SECRET: 'test-secret' }), stdio: ['ignore','pipe','pipe'] });
+  const child = spawn('node', ['server.js'], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP, PORT: String(PORT), PAINEL_SECRET: 'test-secret', PLANO_FREE_MAX_EVENTS_MES: '2' }), stdio: ['ignore','pipe','pipe'] });
   child.stderr.on('data', d=>process.stderr.write('[app!] '+d));
   return child;
 }
 const sleep = (ms) => new Promise(r=>setTimeout(r, ms));
-async function waitUp(){ for (let i=0;i<60;i++){ try { const r = await fetch(BASE+'/hook/healthcheck', { method:'POST' }); if (r.ok) return; } catch(e){} await sleep(200); } throw new Error('app nao subiu'); }
+async function waitUp(base){ const B = base || BASE; for (let i=0;i<60;i++){ try { const r = await fetch(B+'/hook/healthcheck', { method:'POST' }); if (r.ok) return; } catch(e){} await sleep(200); } throw new Error('app nao subiu'); }
 async function main(){
   let app = boot(); await waitUp();
   const Database = require(path.join(ROOT,'node_modules','better-sqlite3'));
@@ -43,13 +43,26 @@ async function main(){
 
   t('migrations 001+002+003 registradas', () => {
     const ids = q('SELECT id FROM _migrations').map(r=>r.id).sort();
-    assert.deepStrictEqual(ids, ['001','002','003']);
+    assert.deepStrictEqual(ids, ['001','002','003','004']);
   });
   t('tenant default criado (LEGACY, ativo)', () => {
     const r = q("SELECT * FROM tenants WHERE id='default'")[0];
     assert(r && r.nome==='LEGACY' && r.status==='ativo');
   });
-  t('tenants: plano default free', () => { assert.strictEqual(q("SELECT plano FROM tenants WHERE id='default'")[0].plano,'free'); });
+  t('tenants: plano default = master (Fase 3)', () => { assert.strictEqual(q("SELECT plano FROM tenants WHERE id='default'")[0].plano,'master'); });
+  t('004: colunas trial_ate/pago_ate/over_limit', () => {
+    assert(db.prepare('PRAGMA table_info(tenants)').all().some(c=>c.name==='trial_ate'));
+    assert(db.prepare('PRAGMA table_info(tenants)').all().some(c=>c.name==='pago_ate'));
+    assert(db.prepare('PRAGMA table_info(events)').all().some(c=>c.name==='over_limit'));
+  });
+  t('004: tenant default sem trial/pago (master ilimitado)', () => {
+    const d = q("SELECT trial_ate, pago_ate FROM tenants WHERE id='default'")[0];
+    assert(d.trial_ate===null && d.pago_ate===null);
+  });
+  t('004: tenant free ganha trial +30d', () => {
+    const t2 = q("SELECT trial_ate FROM tenants WHERE id!='default' AND plano='free' AND trial_ate IS NOT NULL LIMIT 1")[0];
+    if (t2) assert(Date.parse(t2.trial_ate) > Date.now());
+  });
   t('users tem tenant_id', () => { assert(db.prepare('PRAGMA table_info(users)').all().some(c=>c.name==='tenant_id')); });
   t('events tem tenant_id', () => { assert(db.prepare('PRAGMA table_info(events)').all().some(c=>c.name==='tenant_id')); });
   t('acoes tem tenant_id', () => { assert(db.prepare('PRAGMA table_info(acoes)').all().some(c=>c.name==='tenant_id')); });
@@ -258,11 +271,118 @@ async function main(){
     assert.strictEqual(q("SELECT COUNT(*) c FROM users WHERE nome='Lixo'")[0].c, 0);
   });
 
+  // ===================== FASE 3: planos + billing =====================
+  // over_limit: evento acima do limite grava marcado (nao perde venda)
+  r = await fetch(BASE + '/hook/emptest/ovl', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ webhook_evento:'venda.paga', venda:{id:'vovl'} }) });
+  t('evento over_limit grava com 200', () => { assert.strictEqual(r.status, 200); });
+  t('evento over_limit marcado no tenant free (limite 2/mes)', () => {
+    assert.strictEqual(q("SELECT over_limit FROM events WHERE origem='ovl' AND tenant_id=?", tid)[0].over_limit, 1);
+  });
+  await tA('tenant master/default NUNCA marca over_limit', async () => {
+    const rr = await fetch(BASE + '/hook/ovl-default', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
+    const j = await rr.json();
+    assert(j.ok === true && !j.over_limit);
+  });
+
+  // trial expirado: painel bloqueado com pagina renove, webhook 402, master/default nunca
+  await tA('trial do tenant expira (simulacao)', async () => {
+    db.prepare('UPDATE tenants SET trial_ate=? WHERE id=?').run(new Date(Date.now() - 86400000).toISOString(), tid);
+    const tt = await (await fetch(BASE + '/', { headers:{cookie:cookieP} })).text();
+    assert(tt.includes('Plano expirado'));
+  });
+  await tA('webhook de tenant com plano expirado -> 402', async () => {
+    const rr = await fetch(BASE + '/hook/emptest/pos-expira', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
+    assert.strictEqual(rr.status, 402);
+  });
+  await tA('master NUNCA bloqueado por plano', async () => {
+    const rr = await fetch(BASE + '/', { headers:{cookie:cookie2} });
+    const tt = await rr.text();
+    assert.strictEqual(rr.status, 200);
+    assert(tt.includes('💳 Financeiro') && tt.includes('Empresas (tenants)'));
+  });
+  await tA('webhook do default NUNCA bloqueado', async () => {
+    const rr = await fetch(BASE + '/hook/pos-expira-default', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
+    assert.strictEqual(rr.status, 200);
+  });
+
+  // manual ativar plano (master): destrava na hora
+  await tA('membro 403 ao ativar plano', async () => {
+    const rr = await fetch(BASE + '/admin/tenant/plano', { method:'POST', headers:{'content-type':'application/json', cookie:cookieM}, body: JSON.stringify({ tenant_id: tid, plano:'basico' }) });
+    assert.strictEqual(rr.status, 403);
+  });
+  await tA('master ativa plano manualmente -> pago_ate +30d', async () => {
+    const rr = await fetch(BASE + '/admin/tenant/plano', { method:'POST', headers:{'content-type':'application/json', cookie:cookie2}, body: JSON.stringify({ tenant_id: tid, plano:'basico' }) });
+    const j = await rr.json(); assert(j.ok === true && j.plano === 'basico');
+    const row = q('SELECT plano, pago_ate FROM tenants WHERE id=?', tid)[0];
+    assert(row.plano === 'basico' && Date.parse(row.pago_ate) > Date.now() + 29*86400000);
+  });
+  await tA('painel do tenant destravado apos pagamento manual', async () => {
+    const rr = await fetch(BASE + '/', { headers:{cookie:cookieP} });
+    const tt = await rr.text();
+    assert.strictEqual(rr.status, 200);
+    assert(!tt.includes('Plano expirado') && tt.includes('LEGACY') === false || tt.length > 1000);
+  });
+  await tA('webhook do tenant volta a 200 apos pagamento', async () => {
+    const rr = await fetch(BASE + '/hook/emptest/pos-pagamento', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
+    assert.strictEqual(rr.status, 200);
+  });
+
+  // webhook pagamento: modo seco (sem credenciais MP) -> 200 e NAO ativa
+  await tA('webhook MP seco: 200 e nao ativa plano', async () => {
+    const rr = await fetch(BASE + '/webhook/pagamento', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ tenant_id: tid, plano:'pro', action:'payment.updated', data:{ status:'approved' } }) });
+    const j = await rr.json();
+    assert(j.ok === true && j.modo === 'seco');
+    const row = q('SELECT plano FROM tenants WHERE id=?', tid)[0];
+    assert.strictEqual(row.plano, 'basico'); // permanece
+  });
+  await tA('webhook MP livre (sem cookie)', async () => {
+    const rr = await fetch(BASE + '/webhook/pagamento', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
+    assert.strictEqual(rr.status, 200);
+  });
+
+  // limite max_users por plano (helper, conexao direta na mesma base)
+  await tA('limite max_users respeitado (helper)', async () => {
+    const { spawnSync } = require('child_process');
+    const code = [
+      "const b=require('./src/billing');const Database=require('better-sqlite3');",
+      "const db=new Database(process.env.DATA_DIR+'/events.db');",
+      `db.prepare(\"INSERT OR IGNORE INTO tenants (id,nome,subdominio,plano,status,criado_em) VALUES ('t-lim','L','lim','basico','ativo',?)\").run(new Date().toISOString());`,
+      `for(let i=0;i<10;i++)db.prepare(\"INSERT INTO users (nome,pin_hash,salt,status,role,criado_em,tenant_id) VALUES (?,?,'x','ativo','membro',?,'t-lim')\").run('lu'+i,'h',new Date().toISOString());`,
+      "console.log(JSON.stringify({cheio:!b.podeAdicionarUser('t-lim'),livre:b.podeAdicionarUser('default'),lim:b.limiteEventos('t-lim'),semLimite:b.limiteEventos('default')}))"
+    ].join('');
+    const out = spawnSync('node', ['-e', code], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP }), encoding: 'utf8' });
+    const j = JSON.parse(out.stdout.trim().split('\n').pop());
+    assert(j.cheio === true && j.livre === true && j.lim === 10 && j.semLimite === null);
+  });
+
+  // Boot 3: com MP_WEBHOOK_SECRET — assinatura invalida 401; valida 200 seco (sem token)
+  app.kill();
+  const PORT2 = PORT + 1;
+  app = spawn('node', ['server.js'], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP, PORT: String(PORT2), PAINEL_SECRET: 'test-secret', MP_WEBHOOK_SECRET: 'segredo-teste' }), stdio: ['ignore','pipe','pipe'] });
+  const BASE2 = 'http://127.0.0.1:' + PORT2;
+  await waitUp(BASE2);
+  const crypto3 = require('crypto');
+  const body3 = JSON.stringify({ tenant_id: tid, plano:'pro' });
+  const sigOk = crypto3.createHmac('sha256', 'segredo-teste').update(body3).digest('hex');
+  await tA('webhook MP assinatura errada -> 401', async () => {
+    const rr = await fetch(BASE2 + '/webhook/pagamento', { method:'POST', headers:{'content-type':'application/json','x-signature':'deadbeef'}, body: body3 });
+    assert.strictEqual(rr.status, 401);
+  });
+  await tA('webhook MP assinatura ok (modo seco) -> 200 e nao ativa', async () => {
+    const rr = await fetch(BASE2 + '/webhook/pagamento', { method:'POST', headers:{'content-type':'application/json','x-signature':sigOk}, body: body3 });
+    const j = await rr.json();
+    assert(j.ok === true && j.modo === 'seco');
+    assert.strictEqual(q('SELECT plano FROM tenants WHERE id=?', tid)[0].plano, 'basico');
+  });
+  app.kill();
+  // Boot 4 (normal) para fechar o fluxo padrão da suite
+  app = boot(); await waitUp();
+
   // grep audit: queries em users/events/acoes/auditoria mencionam tenant
   {
     const files = ['src/vendas.js','src/admin.js','src/auditoria.js','src/ranking.js','src/auth.js'];
     // Excecoes intencionais (globais por design na Fase 1): PIN unico global (login/pinEmUso/usersCount) e criacao do 1o admin
-    const allow = ['src/auth.js:27','src/auth.js:48','src/auth.js:92'];
+    const allow = ['src/auth.js:28','src/auth.js:49','src/auth.js:93'];
     let bad = [];
     for (const f of files){
       const src = fs.readFileSync(path.join(ROOT,f), 'utf8');
@@ -283,7 +403,7 @@ async function main(){
   const db2 = new Database(path.join(TMP,'events.db'));
   t('migration idempotente', () => {
     const rows = db2.prepare('SELECT id, COUNT(*) c FROM _migrations GROUP BY id ORDER BY id').all();
-    assert.deepStrictEqual(rows.map(r=>[r.id,r.c]), [['001',1],['002',1],['003',1]]);
+    assert.deepStrictEqual(rows.map(r=>[r.id,r.c]), [['001',1],['002',1],['003',1],['004',1]]);
   });
   t('tenant default nao duplica', () => {
     assert.strictEqual(db2.prepare("SELECT COUNT(*) c FROM tenants WHERE id='default'").get().c, 1);
