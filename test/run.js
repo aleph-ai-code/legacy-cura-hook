@@ -350,7 +350,7 @@ async function main(){
       `for(let i=0;i<10;i++)db.prepare(\"INSERT INTO users (nome,pin_hash,salt,status,role,criado_em,tenant_id) VALUES (?,?,'x','ativo','membro',?,'t-lim')\").run('lu'+i,'h',new Date().toISOString());`,
       "console.log(JSON.stringify({cheio:!b.podeAdicionarUser('t-lim'),livre:b.podeAdicionarUser('default'),lim:b.limiteEventos('t-lim'),semLimite:b.limiteEventos('default')}))"
     ].join('');
-    const out = spawnSync('node', ['-e', code], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP }), encoding: 'utf8' });
+    const out = spawnSync('node', ['-e', code], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP, PLANO_BASICO_MAX_EVENTS_MES: '10' }), encoding: 'utf8' });
     const j = JSON.parse(out.stdout.trim().split('\n').pop());
     assert(j.cheio === true && j.livre === true && j.lim === 10 && j.semLimite === null);
   });
@@ -377,6 +377,112 @@ async function main(){
   app.kill();
   // Boot 4 (normal) para fechar o fluxo padrão da suite
   app = boot(); await waitUp();
+
+
+  // ===================== FASE 4: metricas, backups, landing, hardening =====================
+  // metricas: JSON master-only com numeros corretos
+  await tA('metricas: membro 403', async () => {
+    const rr = await fetch(BASE + '/master/metricas', { headers:{cookie:cookieM} });
+    assert.strictEqual(rr.status, 403);
+  });
+  await tA('metricas: sem cookie 401/redirect', async () => {
+    const rr = await fetch(BASE + '/master/metricas');
+    assert([200,401].includes(rr.status)); // HTML de login (200) ou 401
+    if (rr.status === 200) assert((await rr.text()).includes('Seu PIN'));
+  });
+  await tA('metricas: master ve JSON com numeros do tenant', async () => {
+    const rr = await fetch(BASE + '/master/metricas', { headers:{cookie:cookie2} });
+    const j = await rr.json();
+    assert(j.ok === true && j.mes.length === 7);
+    const m = j.metricas.find(x => x.tenant_id === tid);
+    assert(m, 'tenant emptest nas metricas');
+    assert(m.eventos_mes >= 1, 'eventos_mes >= 1');
+    assert(m.over_limit_mes >= 1, 'over_limit_mes >= 1');
+    assert(m.users_ativos >= 1, 'users_ativos >= 1');
+    assert(m.ultimo_acesso, 'ultimo_acesso presente (login_ok)');
+    assert(m.empresa === 'Empresa Teste');
+  });
+  await tA('metricas: card so aparece no painel master', async () => {
+    const tm = await (await fetch(BASE + '/', { headers:{cookie:cookieM} })).text();
+    assert(!tm.includes('📊 Métricas'));
+    const tt = await (await fetch(BASE + '/', { headers:{cookie:cookie2} })).text();
+    assert(tt.includes('📊 Métricas'));
+  });
+  await tA('metricas: CSV master 200 com colunas', async () => {
+    const rr = await fetch(BASE + '/master/metricas.csv', { headers:{cookie:cookie2} });
+    assert.strictEqual(rr.status, 200);
+    const txt = await rr.text();
+    assert(txt.includes('eventos_mes,over_limit_mes,users_ativos') && txt.includes(tid));
+  });
+  await tA('metricas.csv: membro 403', async () => {
+    const rr = await fetch(BASE + '/master/metricas.csv', { headers:{cookie:cookieM} });
+    assert.strictEqual(rr.status, 403);
+  });
+  // export por tenant (master)
+  await tA('export por tenant: master 200 com eventos do tenant', async () => {
+    const rr = await fetch(BASE + '/master/export/' + tid, { headers:{cookie:cookie2} });
+    assert.strictEqual(rr.status, 200);
+    const txt = await rr.text();
+    assert(txt.includes('id,origem,evento') && txt.includes('vovl'));
+  });
+  await tA('export por tenant: membro 403 e tenant inexistente 404', async () => {
+    const rr = await fetch(BASE + '/master/export/' + tid, { headers:{cookie:cookieM} });
+    assert.strictEqual(rr.status, 403);
+    const rr2 = await fetch(BASE + '/master/export/t-nao-existe', { headers:{cookie:cookie2} });
+    assert.strictEqual(rr2.status, 404);
+  });
+  // landing publica
+  await tA('landing /sobre: 200 publica, sem dados, com CTA', async () => {
+    const rr = await fetch(BASE + '/sobre');
+    assert.strictEqual(rr.status, 200);
+    const txt = await rr.text();
+    assert(txt.includes('Criar conta grátis') && txt.includes('--gold') && txt.includes('/registrar'));
+    assert(!txt.includes('Chef') && !txt.includes('vovl'), 'sem dados reais');
+  });
+  // headers de seguranca
+  await tA('headers de seguranca presentes', async () => {
+    const rr = await fetch(BASE + '/sobre');
+    assert.strictEqual(rr.headers.get('x-frame-options'), 'DENY');
+    assert.strictEqual(rr.headers.get('x-content-type-options'), 'nosniff');
+    assert.strictEqual(rr.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+  });
+  // rate limit /registrar: 5/hora por IP (suite ja fez 4 POSTs)
+  await tA('rate limit registrar: 5 POSTs/hora por IP', async () => {
+    // boot atual tem REG_FAILS vazio: 5 POSTs (subdominio invalido, nada criado) enchem a janela
+    for (let i = 0; i < 5; i++){
+      const rr = await fetch(BASE + '/registrar', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body:'empresa=X&subdominio=default&nome=Y'+i+'&pin=1', redirect:'manual' });
+      assert(!String(rr.headers.get('location')||'').includes('ratelimit'), 'POST ' + (i+1) + ' ainda processado');
+    }
+    const rr6 = await fetch(BASE + '/registrar', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body:'empresa=Z&subdominio=zzok&nome=W&pin=123456', redirect:'manual' });
+    assert(String(rr6.headers.get('location')||'').includes('ratelimit'), '6o POST bloqueado');
+    const qtd = q("SELECT COUNT(*) c FROM tenants WHERE subdominio='zzok'")[0].c;
+    assert.strictEqual(qtd, 0, 'POST bloqueado nao cria tenant');
+  });
+  await tA('webhook continua livre de auth (nao afetado por hardening)', async () => {
+    const rr = await fetch(BASE + '/hook/fase4-check', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
+    assert.strictEqual(rr.status, 200);
+  });
+  // retencao de backups: 15 backups -> sobra 14
+  await tA('backup com retencao: 15 arquivos -> sobra 14', async () => {
+    const fsMod = require('fs'), pathMod = require('path');
+    const bdir = pathMod.join(TMP, 'backups');
+    fsMod.mkdirSync(bdir, { recursive: true });
+    for (let i = 0; i < 15; i++){
+      const d = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0,10);
+      fsMod.writeFileSync(pathMod.join(bdir, 'events-' + d + '.db'), 'x');
+    }
+    const { spawnSync } = require('child_process');
+    const code = [
+      "const {pruneBackups}=require('./src/db');",
+      "console.log(JSON.stringify({resta: pruneBackups()}));process.exit(0)"
+    ].join('');
+    const out = spawnSync('node', ['-e', code], { cwd: ROOT, env: Object.assign({}, process.env, { DATA_DIR: TMP }), encoding: 'utf8' });
+    const j = JSON.parse(out.stdout.trim().split('\n').pop());
+    assert(j.resta === 14, 'sobra 14, sobrou ' + j.resta);
+    const left = fsMod.readdirSync(bdir).filter(f=>f.endsWith('.db')).sort();
+    assert.strictEqual(left.length, 14);
+    assert(!left[0].includes('2026-01-01'), 'mais antigo removido');
+  });
 
   // grep audit: queries em users/events/acoes/auditoria mencionam tenant
   {
