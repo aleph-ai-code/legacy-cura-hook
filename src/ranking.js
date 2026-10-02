@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
 const { CHECKS, esc, chartCard, startOfToday, requireUser, DEFAULT_TENANT } = require('./util');
+const { exigePlanoAtivo } = require('./billing');
+router.use(exigePlanoAtivo); // Fase 3
 // ===================== RANKING DO TIME (drawer) =====================
 function rankPer(since, tenantId){
   const all = db.prepare('SELECT user_nome, acao FROM acoes WHERE ts >= ? AND tenant_id=?').all(new Date(since).toISOString(), tenantId || DEFAULT_TENANT);

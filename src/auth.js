@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { AUTH_SECRET, AUTH_COOKIE } = require('./config');
 const { db } = require('./db');
 const { logAud, DEFAULT_TENANT } = require('./util');
+const { podeAdicionarUser } = require('./billing');
 // Tenant suspenso/pendente bloqueia login e sessao (Fase 2)
 function tenantDoUsuario(tenantId){ try { return db.prepare('SELECT status FROM tenants WHERE id=?').get(tenantId || DEFAULT_TENANT); } catch(e){ return null; } }
 function tenantBloqueado(user){ const t = tenantDoUsuario(user && user.tenant_id); return !!t && t.status !== 'ativo'; }
@@ -125,6 +126,7 @@ router.post('/login/novo', (req,res)=>{
   const nome = String(f.nome||'').trim();
   const fraco = pinFraco(f.pin);
   if (!nome || fraco){ loginRegFail(req.ip || '?'); return res.redirect(302, '/?erro=' + (fraco==='formato' ? 'existe' : 'fraco')); }
+  if (!podeAdicionarUser(DEFAULT_TENANT)) return res.redirect(302, '/?erro=limite_plano'); // Fase 3: max_users do plano
   loginRegOk(req.ip || '?');
   try {
     const stored = makePinHash(f.pin);

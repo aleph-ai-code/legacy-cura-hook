@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
 const { esc, requireAdmin, csvField, fmtHHMM, fmtDT, startOfToday, DEFAULT_TENANT } = require('./util');
+const { exigePlanoAtivo } = require('./billing');
+router.use(exigePlanoAtivo); // Fase 3
 const tenantOf = (req) => (req.user && req.user.tenant_id) || DEFAULT_TENANT;
 // ===== Auditoria: descricao legivel + resumo do dia =====
 const ACAO_TXT = {
