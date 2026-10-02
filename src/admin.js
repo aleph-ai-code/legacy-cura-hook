@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('./db');
 const { checkPin, makePinHash, pinFraco, pinEmUso } = require('./auth');
-const { esc, logAud, adminCountExcept, requireAdmin, isMaster, DEFAULT_TENANT } = require('./util');
+const { esc, logAud, adminCountExcept, requireAdmin, isMaster, fmtCardDT, DEFAULT_TENANT } = require('./util');
 const { tenantsCardHtml } = require('./tenants');
 const tenantOf = (req) => (req.user && req.user.tenant_id) || DEFAULT_TENANT;
 // ===================== ADMIN: aprovacao de cadastros =====================

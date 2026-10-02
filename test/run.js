@@ -239,12 +239,15 @@ async function main(){
     const rw = await fetch(BASE + '/hook/emptest/evo-z', { method:'POST', headers:{'content-type':'application/json'}, body:'{}' });
     assert.strictEqual(rw.status, 200);
   });
-  // master pendentes: painel do master mostra empresa/subdominio
-  await tA('painel master mostra card tenants', async () => {
-    const tt = await (await fetch(BASE + '/', { headers:{cookie:cookie2} })).text();
-    assert(tt.includes('Empresas (tenants)') && tt.includes('Aprovações de membros'));
-  });
+  // master pendentes: painel do master mostra empresa/subdominio (com pendentes na tela)
   await fetch(BASE + '/login/novo', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body:'nome=PedroEmp&pin=514923', redirect:'manual' });
+  await tA('painel master mostra card tenants + pendentes', async () => {
+    const rr = await fetch(BASE + '/', { headers:{cookie:cookie2} });
+    const tt = await rr.text();
+    assert.strictEqual(rr.status, 200);
+    assert(tt.includes('Empresas (tenants)') && tt.includes('Aprovações de membros'));
+    assert(tt.includes('PedroEmp'));
+  });
   // nota: PedroEmp cai no tenant default (login/novo) — self-service de MEMBRO continua no tenant do... na verdade pendente global; master ve com badge da empresa
   await tA('rejeitar tenant remove users e tenant', async () => {
     const rr = await fetch(BASE + '/registrar', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body:'empresa=Lixo&subdominio=lixotest&nome=Lixo&pin=918273', redirect:'manual' });
