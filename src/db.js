@@ -91,16 +91,23 @@ const rowToEvent = (r) => { let body={}; try{ body=JSON.parse(r.json); }catch(e)
 })();
 
 // ===================== BACKUP DIARIO =====================
+const BACKUP_KEEP = 14; // Fase 4: retencao de 14 backups diarios
+// Apaga backups mais antigos que os ultimos BACKUP_KEEP
+function pruneBackups(keep){
+  const n = Number(keep) > 0 ? Number(keep) : BACKUP_KEEP;
+  const files = fs.readdirSync(BACKUP_DIR).filter(f=>f.startsWith('events-')&&f.endsWith('.db')).sort();
+  while (files.length > n) fs.unlinkSync(path.join(BACKUP_DIR, files.shift()));
+  return files.length;
+}
 function doBackup(){
   try {
     const d = localDay(Date.now());
     const dest = path.join(BACKUP_DIR, 'events-' + d + '.db');
     fs.copyFileSync(DB_FILE, dest);
-    const files = fs.readdirSync(BACKUP_DIR).filter(f=>f.startsWith('events-')&&f.endsWith('.db')).sort();
-    while (files.length > 30) fs.unlinkSync(path.join(BACKUP_DIR, files.shift()));
+    pruneBackups();
     return path.basename(dest);
   } catch(e){ console.error('backup erro:', e.message); return null; }
 }
-setInterval(doBackup, 24*60*60*1000);
+setInterval(doBackup, 24*60*60*1000).unref(); // nao segura o processo (testes/uso como modulo)
 
-module.exports = { db, insStmt, dedupKey, allRows, rowToEvent, doBackup, DEFAULT_TENANT };
+module.exports = { db, insStmt, dedupKey, allRows, rowToEvent, doBackup, pruneBackups, DEFAULT_TENANT };
