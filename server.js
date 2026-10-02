@@ -13,11 +13,19 @@ app.set('trust proxy', 1); // atras do Traefik: rate limit usa IP real (X-Forwar
 app.use(express.json({limit:'2mb'}));
 app.use(express.text({type:'*/*', limit:'2mb'}));
 
+// Fase 4: headers de seguranca basicos (global, inclusive webhooks — nao afeta auth)
+app.use((req,res,next)=>{
+  res.setHeader('X-Frame-Options','DENY');
+  res.setHeader('X-Content-Type-Options','nosniff');
+  res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
+  next();
+});
+
 // Middleware: tudo exige cookie, EXCETO webhook (EVO nao autentica) e login/logout
 app.use((req,res,next)=>{
   if (req.path.startsWith('/hook/')) return next();
   if (req.method==='POST' && (req.path==='/login' || req.path==='/login/criar' || req.path==='/login/novo' || req.path==='/logout' || req.path==='/registrar' || req.path==='/webhook/pagamento')) return next();
-  if (req.method==='GET' && req.path==='/registrar') return next();
+  if (req.method==='GET' && (req.path==='/registrar' || req.path==='/sobre')) return next();
   if (req.path==='/favicon.ico') return res.status(404).end();
   const user = getAuth(req);
   if (user){ req.user = user; return next(); }
@@ -29,6 +37,8 @@ app.use((req,res,next)=>{
 
 app.use(require('./src/auth').router);   // /login, /login/criar, /login/novo, /logout
 app.use(require('./src/registrar'));     // /registrar (self-service de tenant)
+app.use(require('./src/sobre'));         // /sobre (landing publica)
+app.use(require('./src/metricas').router); // /master/metricas(.csv), /master/export/:tenant_id (master)
 app.use(require('./src/tenants').router);// /admin/tenant/* (master)
 app.use(require('./src/admin').router);  // /admin/*, /me/trocar_pin
 app.use(require('./src/auditoria').router); // /auditoria, /auditoria.csv
