@@ -4,11 +4,8 @@ const path = require('path');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const app = express();
+const { DATA_DIR, DB_FILE, LEGACY_JSON, BACKUP_DIR, AUTH_SECRET, AUTH_COOKIE, TZ } = require('./src/config');
 app.set('trust proxy', 1); // atrás do Traefik: rate limit usa IP real (X-Forwarded-For)
-const DATA_DIR = process.env.DATA_DIR || '/data';
-const DB_FILE = path.join(DATA_DIR, 'events.db');
-const LEGACY_JSON = process.env.DATA_FILE || path.join(DATA_DIR, 'events.json');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
@@ -96,8 +93,6 @@ app.use(express.json({limit:'2mb'}));
 app.use(express.text({type:'*/*', limit:'2mb'}));
 
 // ===================== USUARIOS + LOGIN (nome + PIN) =====================
-const AUTH_SECRET = process.env.PAINEL_SECRET || (console.warn('[seguranca] PAINEL_SECRET nao definido: gerando segredo aleatorio por boot (sessoes/cookies serao invalidados a cada restart). Defina PAINEL_SECRET no .env.'), crypto.randomBytes(32).toString('hex'));
-const AUTH_COOKIE = 'painel_auth';
 function hashPin(pin, salt){ return crypto.scryptSync(String(pin), salt, 64).toString('hex'); }
 function makePinHash(pin){ const salt = crypto.randomBytes(16).toString('hex'); return salt + ':' + hashPin(pin, salt); }
 function checkPin(pin, stored){ try { const parts = String(stored).split(':'); const h = hashPin(pin, parts[0]); return !!parts[1] && crypto.timingSafeEqual(Buffer.from(h,'hex'), Buffer.from(parts[1],'hex')); } catch(e){ return false; } }
@@ -555,7 +550,6 @@ function auditoriaPage(rows, usuarios, tipos, fUsuario, fTipo){
 }
 
 // ===================== TIMEZONE (exibicao em America/Fortaleza) =====================
-const TZ = 'America/Fortaleza';
 const dayFmt = new Intl.DateTimeFormat('en-CA', {timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit'}); // YYYY-MM-DD
 const hourFmt = new Intl.DateTimeFormat('en-GB', {timeZone: TZ, hour:'numeric', hour12:false});
 function localDay(ts){ try { return dayFmt.format(new Date(ts)); } catch(e){ return String(ts).slice(0,10); } }
