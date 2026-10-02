@@ -16,7 +16,7 @@ app.use(express.text({type:'*/*', limit:'2mb'}));
 // Middleware: tudo exige cookie, EXCETO webhook (EVO nao autentica) e login/logout
 app.use((req,res,next)=>{
   if (req.path.startsWith('/hook/')) return next();
-  if (req.method==='POST' && (req.path==='/login' || req.path==='/login/criar' || req.path==='/login/novo' || req.path==='/logout' || req.path==='/registrar')) return next();
+  if (req.method==='POST' && (req.path==='/login' || req.path==='/login/criar' || req.path==='/login/novo' || req.path==='/logout' || req.path==='/registrar' || req.path==='/webhook/pagamento')) return next();
   if (req.method==='GET' && req.path==='/registrar') return next();
   if (req.path==='/favicon.ico') return res.status(404).end();
   const user = getAuth(req);
@@ -34,6 +34,7 @@ app.use(require('./src/admin').router);  // /admin/*, /me/trocar_pin
 app.use(require('./src/auditoria').router); // /auditoria, /auditoria.csv
 app.use(require('./src/ranking').router);   // /api/ranking
 app.use(require('./src/vendas'));        // /, /export.csv, /api/acao(+toggle), /backup
+app.use(require('./src/billing').router); // /webhook/pagamento (MP, Fase 3)
 app.use(require('./src/webhooks'));      // /hook/:origem
 
 const PORT = Number(process.env.PORT) || 3210;
